@@ -119,6 +119,7 @@ if('serviceWorker' in navigator){
       await window.dbSet(col, item.id, item);
     },
     saveCollection: async function(col, arr) {
+      if(!arr||arr.length===0) return;
       var batch = db.batch();
       arr.forEach(function(item){
         batch.set(db.collection(col).doc(item.id), item);
@@ -127,6 +128,30 @@ if('serviceWorker' in navigator){
     },
     deleteItem: async function(col, id) {
       await window.dbDel(col, id);
+    },
+    // Permanently delete a user and ALL their associated data from Firestore
+    deleteUserPermanently: async function(userId) {
+      var batch = db.batch();
+      // Delete user document
+      batch.delete(db.collection('users').doc(userId));
+      // Delete all related data
+      var collections = ['orders','subs','pays','vids'];
+      var deletePromises = collections.map(async function(col) {
+        var snap = await db.collection(col).where('userId','==',userId).get();
+        snap.docs.forEach(function(d){ batch.delete(d.ref); });
+      });
+      await Promise.all(deletePromises);
+      // Delete messages involving this user
+      var msgSnap1 = await db.collection('msgs').where('from','==',userId).get();
+      msgSnap1.docs.forEach(function(d){ batch.delete(d.ref); });
+      var msgSnap2 = await db.collection('msgs').where('to','==',userId).get();
+      msgSnap2.docs.forEach(function(d){ batch.delete(d.ref); });
+      // Remove avatar for this user from the avatars meta doc
+      if(window.DB._cache.avatars && window.DB._cache.avatars[userId]){
+        delete window.DB._cache.avatars[userId];
+        batch.set(db.collection('meta').doc('avatars'), {data: window.DB._cache.avatars});
+      }
+      await batch.commit();
     },
 
     getAvatar: function(uid){ return this._cache.avatars[uid]||null; },
@@ -912,7 +937,8 @@ var S={
         var s=JSON.parse(sess);
         var u=this.users.find(function(u){return u.id===s.id});
         if(u){this.user=u;this.isAdmin=u.isAdmin;}
-      }catch(e){}
+        else{localStorage.removeItem('sas_ss');} // user was deleted — clear stale session
+      }catch(e){localStorage.removeItem('sas_ss');}
     }
 
     // Remove loading overlay and render
@@ -959,6 +985,10 @@ function bindAuth(){
       callback:function(resp){
         try{
           var payload=JSON.parse(atob(resp.credential.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
+          // For Google sign-in: if a user with this email previously existed but was deleted,
+          // they will simply create a fresh account (this is acceptable for OAuth flows).
+          // The key protection is that deleted user IDs are purged from Firestore so their
+          // old data is gone permanently even if they sign up again.
           doLogin({name:payload.name,email:payload.email,password:uid(),method:'google',pic:payload.picture});
         }catch(e){toast('r','Google sign-in failed','Please try email login');}
       }
@@ -984,9 +1014,24 @@ function bindAuth(){
   $('aP')&&$('aP').addEventListener('keydown',function(e){if(e.key==='Enter')$('btnSub')&&$('btnSub').click()});
 }
 function doLogin(opts){
-  var users=S.users,u=users.find(function(u){return u.email===opts.email});
-  if(!u){u={id:uid(),name:opts.name,email:opts.email,password:opts.password,isAdmin:false,method:opts.method||'email',createdAt:new Date().toISOString()};users.push(u);S.users=users}
-  sess(u);
+  var users=S.users;
+  var u=users.find(function(u){return u.email===opts.email});
+  if(u){
+    // Existing user — validate password for email method
+    if(opts.method!=='google' && u.password && u.password!==opts.password){
+      toast('r','Invalid credentials','Check email / password');return;
+    }
+    // Update Google profile pic if signing in via Google
+    if(opts.method==='google'&&opts.pic&&!u.pic){u.pic=opts.pic;S.users=users;}
+    sess(u);
+  }else{
+    // New user — create account (only reached via explicit signup or first-time Google)
+    var newUser={id:uid(),name:opts.name,email:opts.email,password:opts.password,isAdmin:false,method:opts.method||'email',createdAt:new Date().toISOString()};
+    if(opts.pic)newUser.pic=opts.pic;
+    users.push(newUser);
+    S.users=users;
+    sess(newUser);
+  }
 }
 function sess(u){S.user=u;S.isAdmin=u.isAdmin;localStorage.setItem('sas_ss',JSON.stringify({id:u.id}));toast('g','Welcome, '+u.name.split(' ')[0]);setTimeout(function(){render();startRealtimeChat();},280)}
 function logout(){stopRealtimeListeners();localStorage.removeItem('sas_ss');S.user=null;S.isAdmin=false;S.page='dash';toast('a','Signed out');setTimeout(render,200)}
@@ -2571,7 +2616,32 @@ function appPay(id){
   toast('g','Payment approved','Plan activated');swATab('payments');
 }
 function rejPay(id){if(!confirm('Reject this payment?'))return;var pays=S.pays,p=pays.find(function(p){return p.id===id});if(p)p.status='rejected';S.pays=pays;toast('a','Payment rejected');swATab('payments')}
-function delUser(id){if(!confirm('Delete user and all their data? This cannot be undone.'))return;S.users=S.users.filter(function(u){return u.id!==id});S.orders=S.orders.filter(function(o){return o.userId!==id});S.subs=S.subs.filter(function(s){return s.userId!==id});S.pays=S.pays.filter(function(p){return p.userId!==id});S.vids=S.vids.filter(function(v){return v.userId!==id});toast('a','User deleted');swATab('users')}
+function delUser(id){
+  if(!confirm('Delete user and all their data? This cannot be undone.'))return;
+  // Remove from all in-memory caches immediately
+  window.DB._cache.users    = window.DB._cache.users.filter(function(u){return u.id!==id});
+  window.DB._cache.orders   = window.DB._cache.orders.filter(function(o){return o.userId!==id});
+  window.DB._cache.subs     = window.DB._cache.subs.filter(function(s){return s.userId!==id});
+  window.DB._cache.pays     = window.DB._cache.pays.filter(function(p){return p.userId!==id});
+  window.DB._cache.vids     = window.DB._cache.vids.filter(function(v){return v.userId!==id});
+  window.DB._cache.msgs     = window.DB._cache.msgs.filter(function(m){return m.from!==id&&m.to!==id});
+  // Clear any localStorage session for this user
+  try{
+    var sess=localStorage.getItem('sas_ss');
+    if(sess){var s=JSON.parse(sess);if(s.id===id)localStorage.removeItem('sas_ss');}
+  }catch(e){}
+  // Clear localStorage read-markers for this user
+  localStorage.removeItem('sas_lr_'+id);
+  // Persist deletion to Firestore — permanently remove all docs
+  window.DB.deleteUserPermanently(id).then(function(){
+    toast('a','User permanently deleted');
+  }).catch(function(err){
+    toast('r','Delete failed','Check console for details');
+    console.error('delUser Firestore error:',err);
+  });
+  swATab('users');
+  render();
+}
 function addUser(){var n=$('nuN')&&$('nuN').value.trim(),e=$('nuE')&&$('nuE').value.trim(),p=$('nuP')&&$('nuP').value.trim();if(!n||!e||!p){toast('r','Fill all fields');return}if(S.users.find(function(u){return u.email===e})){toast('r','Email already exists');return}var users=S.users;users.push({id:uid(),name:n,email:e,password:p,isAdmin:false,createdAt:new Date().toISOString()});S.users=users;hideM('aMod');toast('g','User added');swATab('users')}
 function grantSub(){var uid2=$('gsU')&&$('gsU').value,pid=$('gsP')&&$('gsP').value,plan=S.cfg.plans.find(function(p){return p.id===pid});if(!plan)return;var subs=S.subs,i=subs.findIndex(function(s){return s.userId===uid2&&s.active});if(i>-1)subs[i].active=false;var end=new Date();plan.period==='Yearly'?end.setFullYear(end.getFullYear()+1):end.setMonth(end.getMonth()+1);subs.push({id:uid(),userId:uid2,planId:plan.id,planName:plan.name,totalVideos:plan.videos,usedVideos:0,active:true,startDate:new Date().toISOString(),endDate:end.toISOString()});S.subs=subs;hideM('aMod');toast('g','Plan granted successfully');swATab('users')}
 function savePlan(){var n=$('npN')&&$('npN').value.trim(),per=$('npP')&&$('npP').value,pr=parseInt(($('npPr')&&$('npPr').value)||0),v=parseInt(($('npV')&&$('npV').value)||0),pop=$('npPop')&&$('npPop').checked;if(!n||!pr||!v){toast('r','Fill all fields');return}var cfg=S.cfg;cfg.plans.push({id:uid(),name:n,period:per,price:pr,videos:v,popular:pop});S.cfg=cfg;hideM('aMod');toast('g','Plan added');swATab('plans')}
@@ -2580,7 +2650,39 @@ function delPlan(id){if(!confirm('Delete this plan?'))return;var cfg=S.cfg;cfg.p
 function saveAnn(){var t=$('anT')&&$('anT').value.trim(),m=$('anM')&&$('anM').value.trim();if(!t||!m){toast('r','Fill all fields');return}var anns=S.anns;anns.unshift({id:uid(),title:t,text:m,date:new Date().toISOString()});S.anns=anns;hideM('aMod');toast('g','Announcement sent');swATab('ann')}
 function delAnn(id){S.anns=S.anns.filter(function(a){return a.id!==id});toast('a','Deleted');swATab('ann')}
 function saveUpi(){var u=$('cfgUpi')&&$('cfgUpi').value.trim();if(!u){toast('r','Enter UPI ID');return}var cfg=S.cfg;cfg.upiId=u;S.cfg=cfg;toast('g','UPI ID updated',u)}
-function clearData(){if(!confirm('Delete ALL user data? Admin account stays.'))return;if(!confirm('This is permanent and cannot be undone. Confirm?'))return;S.orders=[];S.subs=[];S.pays=[];S.anns=[];S.vids=[];S.users=S.users.filter(function(u){return u.isAdmin});if(window._thumbData)window._thumbData={};toast('a','All data cleared');swATab('overview')}
+function clearData(){
+  if(!confirm('Delete ALL user data? Admin account stays.'))return;
+  if(!confirm('This is permanent and cannot be undone. Confirm?'))return;
+  // Capture IDs to delete from Firestore before clearing cache
+  var userIds=window.DB._cache.users.filter(function(u){return !u.isAdmin}).map(function(u){return u.id;});
+  // Clear in-memory caches
+  window.DB._cache.orders=[];
+  window.DB._cache.subs=[];
+  window.DB._cache.pays=[];
+  window.DB._cache.anns=[];
+  window.DB._cache.vids=[];
+  window.DB._cache.msgs=[];
+  window.DB._cache.users=window.DB._cache.users.filter(function(u){return u.isAdmin});
+  if(window._thumbData)window._thumbData={};
+  // Persist deletions to Firestore
+  var deleteAll=userIds.map(function(id){return window.DB.deleteUserPermanently(id);});
+  var cols=['orders','subs','pays','anns','vids','msgs'];
+  var deleteCollections=cols.map(async function(col){
+    var snap=await db.collection(col).get();
+    if(snap.docs.length===0)return;
+    var batch=db.batch();
+    snap.docs.forEach(function(d){batch.delete(d.ref);});
+    return batch.commit();
+  });
+  Promise.all([...deleteAll,...deleteCollections]).then(function(){
+    toast('a','All data cleared');
+  }).catch(function(err){
+    toast('r','Partial failure','Some Firestore docs may remain');
+    console.error('clearData error:',err);
+  });
+  swATab('overview');
+  render();
+}
 
 function retryPay(planId){
   // Show confirmation before retry
