@@ -24,10 +24,138 @@ if('serviceWorker' in navigator){
   window.addEventListener('load',function(){
     navigator.serviceWorker.register('/clipgenai/sw.js').catch(function(){});
   });
+  // Intercept SW-controlled navigations: if SW tries to redirect to a debug/file URL, stop it
+  navigator.serviceWorker.addEventListener('message',function(e){
+    if(e.data&&e.data.type==='OFFLINE_DEBUG_BLOCK'){
+      // SW is telling us it blocked a bad redirect — just stay on page
+    }
+  });
 }
+// Hard block: if this page somehow loaded from a file:// or debug path, redirect to app
+(function(){
+  var h=window.location.href;
+  if(h.indexOf('storage/emulated')>-1||h.indexOf('file://')>-1||h.indexOf('android_asset')>-1){
+    try{window.location.replace('about:blank')}catch(x){}
+  }
+})();
 </script>
 
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
+<!-- Firebase SDK -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script>
+(function(){
+  // ── FIREBASE CONFIG ──────────────────────────────────────
+  var firebaseConfig = {
+    apiKey: "AIzaSyBariyDJ5Y4cM3tf0hxBXZ3HYKnakDGVQM",
+    authDomain: "clipgen-ai-tushya.firebaseapp.com",
+    projectId: "clipgen-ai-tushya",
+    storageBucket: "clipgen-ai-tushya.firebasestorage.app",
+    messagingSenderId: "468277499602",
+    appId: "1:468277499602:web:8134e1942c0da09adf3f0b",
+    measurementId: "G-LY7KCF9BTF"
+  };
+  // ─────────────────────────────────────────────────────────
+
+  firebase.initializeApp(firebaseConfig);
+  var db = firebase.firestore();
+
+  // ── DB HELPER FUNCTIONS ──────────────────────────────────
+  window.dbGet = async function(col, id) {
+    var snap = await db.collection(col).doc(id).get();
+    return snap.exists ? { id: snap.id, ...snap.data() } : null;
+  };
+  window.dbGetAll = async function(col) {
+    var snap = await db.collection(col).get();
+    return snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+  };
+  window.dbSet = async function(col, id, data) {
+    await db.collection(col).doc(id).set(data);
+  };
+  window.dbDel = async function(col, id) {
+    await db.collection(col).doc(id).delete();
+  };
+
+  // ── FIREBASE-BACKED DB OBJECT ────────────────────────────
+  window.DB = {
+    _cache: {
+      users:[], orders:[], subs:[], pays:[],
+      vids:[], anns:[], msgs:[], templates:[],
+      avatars:{}, cfg:null
+    },
+
+    loadAll: async function() {
+      var results = await Promise.all([
+        window.dbGetAll('users'),
+        window.dbGetAll('orders'),
+        window.dbGetAll('subs'),
+        window.dbGetAll('pays'),
+        window.dbGetAll('vids'),
+        window.dbGetAll('anns'),
+        window.dbGetAll('msgs'),
+        window.dbGetAll('templates')
+      ]);
+      this._cache.users     = results[0];
+      this._cache.orders    = results[1];
+      this._cache.subs      = results[2];
+      this._cache.pays      = results[3];
+      this._cache.vids      = results[4];
+      this._cache.anns      = results[5];
+      this._cache.msgs      = results[6];
+      this._cache.templates = results[7];
+
+      var avatarDoc = await window.dbGet('meta','avatars');
+      this._cache.avatars = (avatarDoc && avatarDoc.data) ? avatarDoc.data : {};
+      var cfgDoc = await window.dbGet('meta','cfg');
+      this._cache.cfg = cfgDoc || null;
+    },
+
+    saveItem: async function(col, item) {
+      await window.dbSet(col, item.id, item);
+    },
+    saveCollection: async function(col, arr) {
+      var batch = db.batch();
+      arr.forEach(function(item){
+        batch.set(db.collection(col).doc(item.id), item);
+      });
+      await batch.commit();
+    },
+    deleteItem: async function(col, id) {
+      await window.dbDel(col, id);
+    },
+
+    getAvatar: function(uid){ return this._cache.avatars[uid]||null; },
+    setAvatar: async function(uid, url){
+      this._cache.avatars[uid]=url;
+      await window.dbSet('meta','avatars',{data:this._cache.avatars});
+    },
+
+    getCfg: function(){
+      var def={upiId:'tushyasharma@fam',plans:[
+        {id:'bm',name:'Basic',period:'Monthly',price:999,videos:30,popular:false},
+        {id:'pm',name:'Pro',period:'Monthly',price:1999,videos:100,popular:true},
+        {id:'by',name:'Basic',period:'Yearly',price:9999,videos:360,popular:false},
+        {id:'py',name:'Pro',period:'Yearly',price:19999,videos:1200,popular:false}
+      ]};
+      return this._cache.cfg ? Object.assign({},def,this._cache.cfg) : def;
+    },
+    saveCfg: async function(cfg){
+      this._cache.cfg=cfg;
+      await window.dbSet('meta','cfg',cfg);
+    },
+
+    getLastRead: function(uid2){ return localStorage.getItem('sas_lr_'+uid2)||'0'; },
+    markRead: function(uid2){ localStorage.setItem('sas_lr_'+uid2,new Date().toISOString()); }
+  };
+
+  window._fbReady = true;
+  if(window._fbReadyCb) window._fbReadyCb();
+})();
+</script>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -149,9 +277,16 @@ textarea.inp{resize:vertical;min-height:86px}
 
 .bnav{position:fixed;bottom:0;left:0;right:0;height:68px;display:flex;background:rgba(6,6,10,.75);backdrop-filter:blur(24px) saturate(1.5);-webkit-backdrop-filter:blur(24px) saturate(1.5);border-top:1px solid var(--b1);z-index:200;padding-bottom:env(safe-area-inset-bottom)}
 [data-theme=light] .bnav{background:rgba(242,242,248,.82)}
-.ni{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;transition:all .15s;color:var(--ink3)}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;transition:color .22s var(--ease),transform .22s var(--spring);color:var(--ink3)}
 .ni.on{color:var(--ac2)}.ni:hover{color:var(--ink2)}
-.ni-i{font-size:19px;line-height:1}.ni-l{font-size:9px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.ni:active{transform:scale(.88)}
+.ni-i{font-size:19px;line-height:1;transition:transform .22s var(--spring),filter .22s var(--ease)}
+.ni.on .ni-i{transform:scale(1.22) translateY(-2px);filter:drop-shadow(0 0 6px rgba(157,113,255,.55))}
+.ni-l{font-size:9px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;transition:opacity .2s var(--ease),font-weight .2s}
+.ni.on .ni-l{font-weight:800;opacity:1}
+.ni:not(.on) .ni-l{opacity:.55}
+@keyframes niPop{0%{transform:scale(1.22) translateY(-2px)}40%{transform:scale(1.32) translateY(-3px)}100%{transform:scale(1.22) translateY(-2px)}}
+.ni.on .ni-i{animation:niPop .3s var(--spring)}
 
 /* ── PAGES ────────────────────────────────────────────── */
 .pg{display:none;animation:fup .2s var(--ease) both}.pg.on{display:block}
@@ -400,9 +535,179 @@ details>summary{list-style:none;cursor:pointer}details>summary::-webkit-details-
 .admin-chat-right{flex-direction:column;overflow:hidden}
 .admin-chat-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
 .admin-chat-bar{padding:11px 14px;border-top:1px solid var(--b1);display:flex;gap:8px;align-items:flex-end;background:var(--bg2)}
+
+/* Payment selection styles */
+.pay-card{border-radius:var(--r);background:var(--s1);border:1px solid var(--b1);padding:16px;margin-bottom:12px;transition:all .15s;position:relative;user-select:none;-webkit-user-select:none}
+.pay-card.selected{border-color:rgba(157,113,255,.5);background:var(--acd);box-shadow:0 0 0 2px rgba(157,113,255,.18)}
+.pay-card.select-mode{cursor:pointer}
+.pay-sel-cb{position:absolute;top:12px;right:12px;width:20px;height:20px;border-radius:50%;border:2px solid var(--b2);background:var(--s2);display:flex;align-items:center;justify-content:center;transition:all .15s;font-size:11px;font-weight:700;color:white}
+.pay-card.selected .pay-sel-cb{background:var(--ac);border-color:var(--ac);color:white}
+.pay-sel-bar{position:sticky;top:0;z-index:10;background:var(--bg2);border:1px solid rgba(157,113,255,.25);border-radius:var(--rsm);padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;backdrop-filter:blur(14px)}
+
+/* Video delivery popup */
+@keyframes vidPopIn{from{opacity:0;transform:scale(.88) translateY(24px)}to{opacity:1;transform:scale(1) translateY(0)}}
+.vid-popup-ov{position:fixed;inset:0;background:rgba(0,0,0,.78);backdrop-filter:blur(16px);z-index:800;display:flex;align-items:center;justify-content:center;padding:20px;animation:fin .2s ease}
+.vid-popup{width:100%;max-width:380px;border-radius:22px;padding:0;overflow:hidden;animation:vidPopIn .35s var(--spring);background:var(--bg2);border:1px solid var(--b2);box-shadow:0 28px 72px rgba(0,0,0,.65)}
+.vid-popup-thumb{height:160px;display:flex;align-items:center;justify-content:center;font-size:64px;position:relative;overflow:hidden;background:linear-gradient(135deg,rgba(157,113,255,.15),rgba(45,212,160,.08))}
+.vid-popup-confetti{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.vid-popup-body{padding:22px 22px 20px}
+.vid-popup-new{display:inline-flex;align-items:center;gap:5px;background:rgba(45,212,160,.12);border:1px solid rgba(45,212,160,.28);border-radius:100px;padding:4px 11px;font-size:10px;font-weight:800;letter-spacing:.07em;color:var(--gr);margin-bottom:12px;text-transform:uppercase}
+.vid-popup-title{font-size:20px;font-weight:800;letter-spacing:-.03em;margin-bottom:5px;line-height:1.2}
+.vid-popup-sub{font-size:12px;color:var(--ink3);margin-bottom:18px;font-weight:400}
+.vid-popup-actions{display:flex;gap:8px}
+
+/* Profile edit section */
+.prof-edit-row{display:flex;align-items:center;gap:14px;padding:13px 15px;border-radius:var(--rsm);margin-bottom:6px;background:var(--s1)}
+.prof-edit-label{font-size:11px;font-weight:700;color:var(--ink3);letter-spacing:.07em;text-transform:uppercase;min-width:70px}
+.prof-edit-val{flex:1;font-size:13px;font-weight:600}
+.prof-edit-val.locked{color:var(--ink2)}
+.prof-acc-id{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--ac2);background:var(--acd);border:1px solid rgba(157,113,255,.22);border-radius:6px;padding:3px 8px}
+
+/* ── SKELETON SCREENS ─────────────────────────────────── */
+@keyframes shimmer{0%{background-position:-600px 0}100%{background-position:600px 0}}
+.sk{border-radius:6px;background:var(--s2);background-size:600px 100%;animation:shimmer 1.6s infinite linear}
+[data-theme=dark] .sk{background-image:linear-gradient(90deg,rgba(255,255,255,.04) 0%,rgba(255,255,255,.10) 40%,rgba(255,255,255,.04) 80%)}
+[data-theme=light] .sk{background-image:linear-gradient(90deg,rgba(0,0,0,.04) 0%,rgba(0,0,0,.09) 40%,rgba(0,0,0,.04) 80%)}
+.sk-card{border-radius:var(--r);padding:15px 16px;background:var(--s1);border:1px solid var(--b1)}
+.sk-strip{border-radius:var(--r);padding:22px;background:var(--s1);border:1px solid var(--b1);margin-bottom:20px}
+.sk-row{border-radius:var(--r);padding:13px 14px;background:var(--s1);border:1px solid var(--b1);margin-bottom:8px;display:flex;align-items:center;gap:12px}
+.sk-circle{border-radius:50%;flex-shrink:0}
+.sk-line{border-radius:4px}
+
+/* ══════════════════════════════════════════════════════════
+   OFFLINE SYSTEM
+   ══════════════════════════════════════════════════════════ */
+
+/* 1. LOCK LAYER — sits above app, below the banner.
+      Catches all clicks/touches when offline.             */
+#offlineLock{
+  display:none;
+  position:fixed;inset:0;z-index:8000;
+  cursor:not-allowed;
+  /* subtle frosted tint so the UI is still visible */
+  background:rgba(6,6,10,.55);
+  backdrop-filter:blur(2px) saturate(.7);
+  -webkit-backdrop-filter:blur(2px) saturate(.7);
+}
+[data-theme=light] #offlineLock{background:rgba(242,242,248,.60)}
+body.is-offline #offlineLock{display:block}
+
+/* 2. CSS-level disable of every interactive element */
+body.is-offline button,
+body.is-offline a,
+body.is-offline input,
+body.is-offline select,
+body.is-offline textarea,
+body.is-offline [onclick],
+body.is-offline .btn,
+body.is-offline .ni,
+body.is-offline .oi,
+body.is-offline .vtc,
+body.is-offline .do,
+body.is-offline .tab,
+body.is-offline .atab,
+body.is-offline .gbtn{
+  pointer-events:none !important;
+  opacity:.38 !important;
+  cursor:not-allowed !important;
+}
+
+/* 3. BANNER — slides down from top, above the lock layer */
+#offlineBanner{
+  position:fixed;top:0;left:0;right:0;z-index:9000;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:0;
+  padding:0;
+  max-height:0;overflow:hidden;
+  transition:max-height .4s cubic-bezier(.4,0,.2,1);
+  pointer-events:none;
+}
+body.is-offline #offlineBanner{max-height:260px;pointer-events:auto}
+
+/* inner card */
+.ob-card{
+  width:100%;
+  background:var(--bg2);
+  border-bottom:1px solid rgba(255,181,71,.22);
+  display:flex;flex-direction:column;align-items:center;
+  padding:28px 24px 24px;
+  text-align:center;
+  position:relative;
+  overflow:hidden;
+}
+/* gradient accent line at very top */
+.ob-card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,var(--am),#FF9A3C,var(--am));
+  background-size:200% 100%;
+  animation:obBar 2s linear infinite;
+}
+@keyframes obBar{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+/* logo row */
+.ob-brand{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.ob-icon{width:36px;height:36px;border-radius:10px;background:rgba(157,113,255,.13);border:1px solid rgba(157,113,255,.28);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.ob-name{font-size:15px;font-weight:800;letter-spacing:-.02em}
+
+/* signal bars */
+.ob-signal{display:flex;align-items:flex-end;gap:3px;margin-bottom:12px}
+.ob-bar{width:5px;border-radius:2px;background:var(--b2)}
+.ob-bar:nth-child(1){height:8px}.ob-bar:nth-child(2){height:12px}.ob-bar:nth-child(3){height:17px}.ob-bar:nth-child(4){height:22px}
+@keyframes obFlash{0%,100%{background:var(--b2)}50%{background:var(--am)}}
+body.is-offline .ob-bar:nth-child(1){animation:obFlash 1.6s 0s infinite}
+body.is-offline .ob-bar:nth-child(2){animation:obFlash 1.6s .15s infinite}
+body.is-offline .ob-bar:nth-child(3){animation:obFlash 1.6s .3s infinite}
+body.is-offline .ob-bar:nth-child(4){animation:obFlash 1.6s .45s infinite}
+
+.ob-title{font-size:16px;font-weight:800;letter-spacing:-.02em;color:var(--ink);margin-bottom:5px}
+.ob-sub{font-size:12px;color:var(--ink2);font-weight:400;line-height:1.5;max-width:260px}
+.ob-sub strong{color:var(--am);font-weight:700}
+
+/* 4. RECONNECTED toast-style flash (shown briefly when back online) */
+#onlineBanner{
+  position:fixed;top:0;left:0;right:0;z-index:9500;
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  padding:10px 16px;
+  background:rgba(45,212,160,.13);
+  border-bottom:1px solid rgba(45,212,160,.28);
+  color:var(--gr);
+  font-size:12px;font-weight:700;letter-spacing:.02em;
+  transform:translateY(-110%);
+  transition:transform .32s cubic-bezier(.34,1.56,.64,1);
+  pointer-events:none;
+}
+#onlineBanner.show{transform:translateY(0)}
+.ob2-dot{width:7px;height:7px;border-radius:50%;background:var(--gr);animation:ob2Pulse 1s ease-in-out 3}
+@keyframes ob2Pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.6)}}
 </style>
 </head>
 <body>
+<!-- ── OFFLINE SYSTEM ─────────────────────────────────── -->
+<!-- Lock layer: absorbs all clicks when offline -->
+<div id="offlineLock" aria-hidden="true"></div>
+
+<!-- Offline banner: slides down from top -->
+<div id="offlineBanner" role="alert" aria-live="assertive" aria-atomic="true">
+  <div class="ob-card">
+    <div class="ob-brand">
+      <div class="ob-icon">&#127916;</div>
+      <span class="ob-name">ClipGen AI</span>
+    </div>
+    <div class="ob-signal">
+      <div class="ob-bar"></div><div class="ob-bar"></div>
+      <div class="ob-bar"></div><div class="ob-bar"></div>
+    </div>
+    <div class="ob-title">You're Offline</div>
+    <div class="ob-sub">Check your <strong>Wi-Fi or mobile data</strong>.<br>The app will resume the moment you reconnect.</div>
+  </div>
+</div>
+
+<!-- Back-online flash banner -->
+<div id="onlineBanner" aria-live="polite">
+  <span class="ob2-dot"></span>
+  Back online — restoring your session
+</div>
+<!-- ──────────────────────────────────────────────────────── -->
 <div id="app"></div>
 <div class="tc" id="tc"></div>
 <script>
@@ -424,6 +729,69 @@ function toast(type,title,msg,dur){
 var showM=function(id){if($(id))$(id).classList.remove('h');};
 var hideM=function(id){if($(id))$(id).classList.add('h');};
 var cobg=function(id){if($(id))$(id).addEventListener('click',function(e){if(e.target===$(id))hideM(id);});};
+
+// ── OFFLINE SYSTEM ─────────────────────────────────────
+(function(){
+  var _onlineFlashTimer = null;
+
+  function goOffline(){
+    document.body.classList.add('is-offline');
+  }
+
+  function goOnline(){
+    document.body.classList.remove('is-offline');
+    // Flash the "back online" banner for 2.8s then hide it
+    var ob2 = document.getElementById('onlineBanner');
+    if(ob2){
+      ob2.classList.add('show');
+      clearTimeout(_onlineFlashTimer);
+      _onlineFlashTimer = setTimeout(function(){
+        ob2.classList.remove('show');
+      }, 2800);
+    }
+  }
+
+  // Instant: trust the browser's online/offline events directly
+  window.addEventListener('offline', function(){
+    goOffline();
+  });
+
+  window.addEventListener('online', function(){
+    goOnline();
+  });
+
+  // Block navigation while offline (back button, links, etc.)
+  window.addEventListener('beforeunload', function(e){
+    if(!navigator.onLine){ e.preventDefault(); e.returnValue = ''; }
+  });
+
+  // Block debug/file paths at load time
+  (function(){
+    var h = window.location.href;
+    if(h.indexOf('storage/emulated') > -1 || h.indexOf('file://') > -1 ||
+       h.indexOf('android_asset') > -1 || h.indexOf('localhost/debug') > -1){
+      try{ history.replaceState(null,'','/clipgenai/'); }catch(x){}
+    }
+  })();
+
+  // Initial state check on page load
+  if(!navigator.onLine){ goOffline(); }
+})();
+// ───────────────────────────────────────────────────────
+
+// -- SKELETON HELPERS --------------------------------------
+function skLine(w,h){h=h||12;return '<div class="sk sk-line" style="width:'+w+';height:'+h+'px"></div>';}
+function skCircle(s){return '<div class="sk sk-circle" style="width:'+s+'px;height:'+s+'px"></div>';}
+function rDashSkeleton(){
+  var statsHtml='<div class="sg">';
+  for(var i=0;i<4;i++)statsHtml+='<div class="sk-card">'+skLine('55%',10)+'<div style="margin-top:10px">'+skLine('45%',28)+'</div></div>';
+  statsHtml+='</div>';
+  var stripHtml='<div class="sk-strip">'+skLine('30%',10)+'<div style="margin-top:12px">'+skLine('50%',44)+'</div><div style="margin-top:8px">'+skLine('70%',10)+'</div><div style="margin-top:12px;height:2px;border-radius:2px;background:var(--b1)"></div><div style="display:flex;justify-content:space-between;margin-top:8px">'+skLine('25%',9)+skLine('25%',9)+'</div></div>';
+  var rowsHtml='<div class="sec"><div class="st">Recent orders</div>';
+  for(var j=0;j<3;j++)rowsHtml+='<div class="sk-row">'+skCircle(38)+'<div style="flex:1;display:flex;flex-direction:column;gap:7px">'+skLine('60%',12)+skLine('40%',9)+'</div>'+skLine('14%',20)+'</div>';
+  rowsHtml+='</div>';
+  return '<div class="ph"><div class="pt">&nbsp;</div>'+skLine('42%',12)+'</div>'+stripHtml+statsHtml+rowsHtml;
+}
 
 // -- CLOUDINARY CONFIG -------------------------------------
 var CDN_CLOUD = 'drfczcit6';
@@ -458,61 +826,98 @@ function uploadToCloudinary(file, onSuccess, onError, onProgress) {
 // -- STATE -------------------------------------------------
 var ADMIN_EMAIL='sharmatushya7@gmail.com';
 var ADMIN_PASS='A1S2D3F4';
+
+// S is now Firebase-backed. Reads from in-memory cache, writes sync to Firestore.
 var S={
   user:null,isAdmin:false,
   theme:localStorage.getItem('sas_t')||'dark',
   page:'dash',atab:'overview',_pt:'Monthly',
-  get users(){return JSON.parse(localStorage.getItem('sas_u')||'[]')},
-  set users(v){localStorage.setItem('sas_u',JSON.stringify(v))},
-  get orders(){return JSON.parse(localStorage.getItem('sas_o')||'[]')},
-  set orders(v){localStorage.setItem('sas_o',JSON.stringify(v))},
-  get subs(){return JSON.parse(localStorage.getItem('sas_s')||'[]')},
-  set subs(v){localStorage.setItem('sas_s',JSON.stringify(v))},
-  get pays(){return JSON.parse(localStorage.getItem('sas_p')||'[]')},
-  set pays(v){localStorage.setItem('sas_p',JSON.stringify(v))},
-  get vids(){return JSON.parse(localStorage.getItem('sas_v')||'[]')},
-  set vids(v){localStorage.setItem('sas_v',JSON.stringify(v))},
-  get anns(){return JSON.parse(localStorage.getItem('sas_a')||'[]')},
-  set anns(v){localStorage.setItem('sas_a',JSON.stringify(v))},
-  get msgs(){return JSON.parse(localStorage.getItem('sas_m')||'[]')},
-  set msgs(v){localStorage.setItem('sas_m',JSON.stringify(v))},
-  get templates(){return JSON.parse(localStorage.getItem('sas_tpl')||'[]')},
-  set templates(v){localStorage.setItem('sas_tpl',JSON.stringify(v))},
-  get avatars(){return JSON.parse(localStorage.getItem('sas_avt')||'{}')},
-  set avatars(v){localStorage.setItem('sas_avt',JSON.stringify(v))},
-  getAvatar:function(uid){var a=this.avatars;return a[uid]||null},
-  setAvatar:function(uid,data){var a=this.avatars;a[uid]=data;this.avatars=a},
-  unread:function(uid2){var last=localStorage.getItem('sas_lr_'+uid2)||'0';return this.msgs.filter(function(m){return m.toId===uid2&&m.createdAt>last}).length},
-  markRead:function(uid2){localStorage.setItem('sas_lr_'+uid2,new Date().toISOString())},
-  get cfg(){
-    var def={upiId:'tushyasharma@fam',plans:[
-      {id:'bm',name:'Basic',period:'Monthly',price:999,videos:30,popular:false},
-      {id:'pm',name:'Pro',period:'Monthly',price:1999,videos:100,popular:true},
-      {id:'by',name:'Basic',period:'Yearly',price:9999,videos:360,popular:false},
-      {id:'py',name:'Pro',period:'Yearly',price:19999,videos:1200,popular:false}
-    ]};
-    return JSON.parse(localStorage.getItem('sas_c')||JSON.stringify(def));
+
+  // ── Reads from in-memory cache ─────────────────────────
+  get users(){return window.DB._cache.users},
+  get orders(){return window.DB._cache.orders},
+  get subs(){return window.DB._cache.subs},
+  get pays(){return window.DB._cache.pays},
+  get vids(){return window.DB._cache.vids},
+  get anns(){return window.DB._cache.anns},
+  get msgs(){return window.DB._cache.msgs},
+  get templates(){return window.DB._cache.templates},
+  get cfg(){return window.DB.getCfg()},
+
+  // ── Writes: update cache + Firestore async ─────────────
+  set users(v){window.DB._cache.users=v;window.DB.saveCollection('users',v)},
+  set orders(v){window.DB._cache.orders=v;window.DB.saveCollection('orders',v)},
+  set subs(v){window.DB._cache.subs=v;window.DB.saveCollection('subs',v)},
+  set pays(v){window.DB._cache.pays=v;window.DB.saveCollection('pays',v)},
+  set vids(v){window.DB._cache.vids=v;window.DB.saveCollection('vids',v)},
+  set anns(v){window.DB._cache.anns=v;window.DB.saveCollection('anns',v)},
+  set msgs(v){window.DB._cache.msgs=v;window.DB.saveCollection('msgs',v)},
+  set templates(v){window.DB._cache.templates=v;window.DB.saveCollection('templates',v)},
+  set cfg(v){window.DB.saveCfg(v)},
+
+  // ── Avatar helpers ─────────────────────────────────────
+  getAvatar:function(uid){return window.DB.getAvatar(uid)},
+  setAvatar:function(uid,data){
+    // sync cache immediately, async save
+    window.DB._cache.avatars[uid]=data;
+    window.DB.setAvatar(uid,data);
   },
-  set cfg(v){localStorage.setItem('sas_c',JSON.stringify(v))},
+
+  // ── Unread / markRead ──────────────────────────────────
+  unread:function(uid2){
+    var last=window.DB.getLastRead(uid2);
+    return this.msgs.filter(function(m){return m.toId===uid2&&m.createdAt>last}).length;
+  },
+  markRead:function(uid2){window.DB.markRead(uid2)},
+
+  // ── Lookups ────────────────────────────────────────────
   uu:function(id){return this.users.find(function(u){return u.id===id})},
   uo:function(uid){return this.orders.filter(function(o){return o.userId===uid})},
   us:function(uid){return this.subs.find(function(s){return s.userId===uid&&s.active})},
-  init:function(){
-    // Purge old demo data
-    var demos=['demo1','ord1','ord2','ord3','sub1','vid1','vid2','ann1','ann2'];
-    ['sas_u','sas_o','sas_s','sas_p','sas_v','sas_a'].forEach(function(k){
-      try{var a=JSON.parse(localStorage.getItem(k)||'[]');if(Array.isArray(a)){localStorage.setItem(k,JSON.stringify(a.filter(function(x){return demos.indexOf(x.id)===-1&&demos.indexOf(x.userId)===-1&&x.email!=='rahul@demo.com'&&x.email!=='admin@clipgenai.com'})))}}catch(e){}
-    });
-    // Ensure correct admin
+
+  // ── Init: load Firebase data, restore session ──────────
+  init:async function(){
+    document.documentElement.setAttribute('data-theme',this.theme);
+
+    // Show loading overlay
+    var ld=document.createElement('div');
+    ld.id='_fbLoad';
+    ld.style.cssText='position:fixed;inset:0;background:var(--bg,#06060A);display:flex;align-items:center;justify-content:center;z-index:99999;flex-direction:column;gap:14px';
+    ld.innerHTML='<div style="width:40px;height:40px;border-radius:10px;background:rgba(157,113,255,.15);border:1px solid rgba(157,113,255,.3);display:flex;align-items:center;justify-content:center;font-size:20px">🎬</div>'+
+    '<div style="font-size:13px;font-weight:600;color:rgba(238,238,242,.6)">Loading ClipGen AI...</div>';
+    document.body.appendChild(ld);
+
+    // Wait for Firebase module to be ready
+    if(!window._fbReady){
+      await new Promise(function(res){window._fbReadyCb=res;});
+    }
+
+    // Load all data from Firestore
+    await window.DB.loadAll();
+
+    // Ensure admin user exists in Firestore
     var users=this.users;
     var adminExists=users.find(function(u){return u.email===ADMIN_EMAIL});
     if(!adminExists){
-      users.push({id:'_adm',name:'Admin',email:ADMIN_EMAIL,password:ADMIN_PASS,isAdmin:true,createdAt:new Date().toISOString()});
-      this.users=users;
+      var adminUser={id:'_adm',name:'Admin',email:ADMIN_EMAIL,password:ADMIN_PASS,isAdmin:true,createdAt:new Date().toISOString()};
+      window.DB._cache.users.push(adminUser);
+      await window.DB.saveItem('users',adminUser);
     }
-    document.documentElement.setAttribute('data-theme',this.theme);
+
+    // Restore session from localStorage (just stores user id)
     var sess=localStorage.getItem('sas_ss');
-    if(sess){try{var s=JSON.parse(sess),u=this.users.find(function(u){return u.id===s.id});if(u){this.user=u;this.isAdmin=u.isAdmin}}catch(e){}}
+    if(sess){
+      try{
+        var s=JSON.parse(sess);
+        var u=this.users.find(function(u){return u.id===s.id});
+        if(u){this.user=u;this.isAdmin=u.isAdmin;}
+      }catch(e){}
+    }
+
+    // Remove loading overlay and render
+    var ldEl=document.getElementById('_fbLoad');
+    if(ldEl)ldEl.remove();
+    render();
   }
 };
 
@@ -589,7 +994,7 @@ function rLayout(){
   '<div class="hb"><div class="hm">&#127916;</div>ClipGen AI</div>'+
   '<div class="hr"><button class="ib" id="btnTh">'+(S.theme==='dark'?'o':'o')+'</button><button class="ib" id="btnBl" title="Announcements">&#128276;</button><div class="av" id="btnAv">'+((S.user.name||'U')[0].toUpperCase())+'</div></div>'+
   '</header><main class="main">'+
-  '<div class="pg on" id="pg-dash">'+rDash()+'</div>'+
+  '<div class="pg on" id="pg-dash">'+rDashSkeleton()+'</div>'+
   '<div class="pg" id="pg-order">'+rOrder()+'</div>'+
   '<div class="pg" id="pg-vids">'+rVids()+'</div>'+
   '<div class="pg" id="pg-plans">'+rPlans()+'</div>'+
@@ -598,7 +1003,7 @@ function rLayout(){
   '<div class="pg" id="pg-payments">'+rUserPays()+'</div>'+
   '</main><nav class="bnav">'+
   [['dash','&#9647;','Home'],['order','&#10022;','Order'],['vids','&#9635;','Videos'],['plans','&#9672;','Plans'],['payments','&#128179;','Payments'],['profile','&#9673;','Me']].map(function(x){return '<div class="ni '+(S.page===x[0]?'on':'')+'" data-pg="'+x[0]+'"><span class="ni-i">'+x[1]+'</span><span class="ni-l">'+x[2]+'</span></div>'}).join('')+
-  '</nav>'+rAnnM()+rOrdM()+rVidM()+rPayM()+
+  '</nav>'+rAnnM()+rOrdM()+rVidM()+rPayM()+rProfileMod()+
   '<button class="chat-btn" id="chatBtn" onclick="toggleChatPanel()">💬<span class="chat-badge" id="chatBadge">0</span></button>'+
   '<div class="chat-panel h" id="chatPanel">'+
     '<div class="chat-header">'+
@@ -627,7 +1032,14 @@ function rLayout(){
 function bindLayout(){
   document.querySelectorAll('.ni').forEach(function(el){el.addEventListener('click',function(){goto(el.dataset.pg)})});
   on('btnTh','click',toggleTh);on('btnBl','click',function(){showM('mAnn')});on('btnAv','click',function(){goto('profile')});
-  cobg('mAnn');cobg('mOrd');cobg('mVid');cobg('mPay');
+  cobg('mAnn');cobg('mOrd');cobg('mVid');cobg('mPay');cobg('aMod');
+  // Swap dash skeleton → real content on first paint
+  requestAnimationFrame(function(){
+    setTimeout(function(){
+      var pg=$('pg-dash');
+      if(pg&&S.page==='dash'){pg.innerHTML=rDash();bindPE('dash');checkNewVidPopup();}
+    },160);
+  });
   bindPE(S.page);
   if(S.page==='chat')bindChat();
 }
@@ -635,10 +1047,43 @@ function goto(p){
   S.page=p;
   document.querySelectorAll('.pg').forEach(function(el){el.classList.remove('on')});
   document.querySelectorAll('.ni').forEach(function(el){el.classList.toggle('on',el.dataset.pg===p)});
-  var pg=$('pg-'+p);if(pg){pg.innerHTML=rPage(p);pg.classList.add('on')}
+  var pg=$('pg-'+p);
+  if(pg){
+    // Show skeleton instantly for dash, then swap to real content
+    if(p==='dash'){
+      pg.innerHTML=rDashSkeleton();
+      pg.classList.add('on');
+      window.scrollTo(0,0);
+      requestAnimationFrame(function(){
+        setTimeout(function(){
+          pg.innerHTML=rDash();
+          bindPE(p);
+          checkNewVidPopup();
+        },160);
+      });
+      return;
+    }
+    pg.innerHTML=rPage(p);pg.classList.add('on');
+  }
   window.scrollTo(0,0);bindPE(p);
+  if(p==='vids')checkNewVidPopup();
 }
 function rPage(p){var m={dash:rDash,order:rOrder,vids:rVids,plans:rPlans,profile:rProfile,chat:rChat,payments:rUserPays};return m[p]?m[p]():''}
+
+// Plan hierarchy: higher index = higher tier
+var PLAN_RANK={'bm':1,'pm':2,'by':3,'py':4};
+function getPlanRank(planId){
+  // Also handle dynamic plans by name+period
+  if(PLAN_RANK[planId]!==undefined)return PLAN_RANK[planId];
+  var p=S.cfg.plans.find(function(pl){return pl.id===planId});
+  if(!p)return 0;
+  var nameRank=p.name==='Pro'?2:1;
+  var periodRank=p.period==='Yearly'?2:1;
+  return nameRank*10+periodRank;
+}
+function isDowngrade(currentPlanId,targetPlanId){
+  return getPlanRank(targetPlanId)<=getPlanRank(currentPlanId);
+}
 function bindPE(p){
   if(p==='order'){
     document.querySelectorAll('.vtc').forEach(function(el){el.addEventListener('click',function(){document.querySelectorAll('.vtc').forEach(function(c){c.classList.remove('sel')});el.classList.add('sel')})});
@@ -654,7 +1099,10 @@ function bindPE(p){
   }
   if(p==='profile')on('pth','change',toggleTh);
   if(p==='chat')bindChat();
-  if(p==='dash')document.querySelectorAll('[data-oid]').forEach(function(el){el.addEventListener('click',function(){openOM(el.dataset.oid)})});
+  if(p==='dash'){
+    document.querySelectorAll('[data-oid]').forEach(function(el){el.addEventListener('click',function(){openOM(el.dataset.oid)})});
+    setTimeout(checkNewVidPopup,600);
+  }
   bindPayM();
 }
 function toggleTh(){
@@ -736,11 +1184,71 @@ function rVids(){
   return html;
 }
 
-// -- PLANS -------------------------------------------------
+// -- VIDEO DELIVERY POPUP ----------------------------------
+function checkNewVidPopup(){
+  if(!S.user)return;
+  var seen=JSON.parse(localStorage.getItem('sas_seen_v')||'{}');
+  var myVids=S.vids.filter(function(v){return v.userId===S.user.id});
+  var unseen=myVids.filter(function(v){return !seen[v.id]});
+  if(unseen.length>0){
+    // Show popup for the most recently delivered unseen video
+    var latest=unseen.sort(function(a,b){return new Date(b.uploadedAt)-new Date(a.uploadedAt)})[0];
+    // Mark all as seen
+    myVids.forEach(function(v){seen[v.id]=true;});
+    localStorage.setItem('sas_seen_v',JSON.stringify(seen));
+    setTimeout(function(){showVidDeliveryPopup(latest,unseen.length);},400);
+  }
+}
+function showVidDeliveryPopup(v,totalNew){
+  var existing=document.getElementById('_vidPopOv');if(existing)existing.remove();
+  var thumb=v.thumbData?
+    '<img src="'+v.thumbData+'" style="width:100%;height:100%;object-fit:cover;display:block">':
+    '<span style="font-size:60px;filter:drop-shadow(0 4px 12px rgba(0,0,0,.3))">'+( v.thumbEmoji||'🎬')+'</span>';
+  var confetti='';
+  var colors=['#9D71FF','#2DD4A0','#FFB547','#5BA4F5','#FF6B6B'];
+  for(var i=0;i<18;i++){
+    var c=colors[i%colors.length];
+    var left=Math.random()*100;
+    var delay=Math.random()*0.8;
+    var dur=1.2+Math.random()*0.8;
+    confetti+='<div style="position:absolute;left:'+left+'%;top:-10px;width:'+(4+Math.random()*5)+'px;height:'+(8+Math.random()*8)+'px;background:'+c+';border-radius:2px;opacity:0.75;animation:confettiFall '+dur+'s '+delay+'s ease-in forwards;transform:rotate('+(Math.random()*360)+'deg)"></div>';
+  }
+  var ov=document.createElement('div');
+  ov.id='_vidPopOv';
+  ov.className='vid-popup-ov';
+  ov.innerHTML=
+  '<style>@keyframes confettiFall{0%{opacity:.85;transform:translateY(0) rotate(0deg)}100%{opacity:0;transform:translateY(180px) rotate(360deg)}}</style>'+
+  '<div class="vid-popup">'+
+    '<div class="vid-popup-thumb">'+
+      '<div class="vid-popup-confetti">'+confetti+'</div>'+
+      thumb+
+    '</div>'+
+    '<div class="vid-popup-body">'+
+      '<div class="vid-popup-new">🎉 '+(totalNew>1?totalNew+' New Videos Delivered':'New Video Delivered')+'</div>'+
+      '<div class="vid-popup-title">'+v.title+'</div>'+
+      '<div class="vid-popup-sub">Your video is ready to download!'+(totalNew>1?' (+'+(totalNew-1)+' more)':'')+'</div>'+
+      '<div class="vid-popup-actions">'+
+        '<button class="btn btn-p" onclick="dlV(\''+v.id+'\');document.getElementById(\'_vidPopOv\').remove()" style="flex:1;padding:13px">⬇ Download</button>'+
+        '<button class="btn btn-g" onclick="document.getElementById(\'_vidPopOv\').remove()" style="padding:13px">Later</button>'+
+      '</div>'+
+    '</div>'+
+  '</div>';
+  document.body.appendChild(ov);
+  ov.addEventListener('click',function(e){if(e.target===ov)ov.remove();});
+}
 function rPlans(){
   var sub=S.us(S.user.id);
   var html='<div class="ph"><div class="pt">Choose a Plan</div><div class="ps">Flexible pricing for every creator</div></div>';
-  if(sub){html+='<div class="alert alg"><span>&#10003;</span><span>Active: <strong>'+sub.planName+'</strong> - expires '+fd(sub.endDate)+'</span></div>';}
+  if(sub){
+    html+='<div class="alert alg"><span>&#10003;</span><span>Active: <strong>'+sub.planName+'</strong> \u2013 expires '+fd(sub.endDate)+'</span></div>';
+    var allPlans=S.cfg.plans;
+    var hasUpgrade=allPlans.some(function(p){return !isDowngrade(sub.planId,p.id)&&p.id!==sub.planId});
+    if(hasUpgrade){
+      html+='<div class="alert ali"><span>&#8679;</span><span>Only <strong>upgrades</strong> are available while your current plan is active. Lower plans are disabled until it expires.</span></div>';
+    }else{
+      html+='<div class="alert ali"><span>&#9733;</span><span>You\'re on the <strong>highest plan</strong>! Renew after expiry to change plans.</span></div>';
+    }
+  }
   html+='<div class="tabs">'+['Monthly','Yearly'].map(function(t){return '<div class="tab '+(S._pt===t?'on':'')+'" data-pt="'+t+'">'+t+(t==='Yearly'?' . Save 15%':'')+'</div>'}).join('')+'</div>';
   html+='<div id="plansB">'+rPlanCards(S.cfg.plans.filter(function(p){return p.period===S._pt}),sub)+'</div>';
   html+='<div style="border-radius:12px;padding:15px 16px;background:var(--s1);border:1px solid var(--b1);margin-top:10px"><div style="font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);margin-bottom:10px">How it works</div><div style="display:flex;flex-direction:column;gap:10px">'+[['1','Select a plan','Choose Monthly or Yearly'],['2','Pay via UPI','App opens with amount pre-filled'],['3','Upload screenshot','Proof of your payment'],['4','Plan activates','Within 2 hours of verification']].map(function(s){return '<div style="display:flex;align-items:center;gap:11px"><div style="width:24px;height:24px;border-radius:50%;background:var(--acd);border:1px solid rgba(157,113,255,.25);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:var(--ac2);flex-shrink:0;font-family:var(--mono)">'+s[0]+'</div><div><div style="font-weight:600;font-size:13px">'+s[1]+'</div><div style="font-size:11px;color:var(--ink3);font-weight:400">'+s[2]+'</div></div></div>'}).join('')+'</div></div>';
@@ -750,12 +1258,19 @@ function rPlanCards(plans,sub){
   return plans.map(function(p){
     var feats=[p.videos+' videos/'+(p.period==='Yearly'?'year':'month'),'All video types','Hindi, English & Hinglish','24h & 48h delivery','Caption + Script included',p.name==='Pro'?'Priority processing':'Standard processing'];
     var saving=p.period==='Yearly'?(p.name==='Pro'?1999*12-p.price:999*12-p.price):0;
+    var isCurrent=sub&&sub.planId===p.id;
+    var isLower=sub&&!isCurrent&&isDowngrade(sub.planId,p.id);
+    var btnClass=isCurrent?'btn-g':(isLower?'btn-d':'btn-p');
+    var btnLabel=isCurrent?'&#10003; Current Plan':(isLower?'&#8595; Lower Plan':'Upgrade &#8594;');
+    var btnDisabled=isCurrent||isLower?'disabled':'';
+    var lowerBadge=isLower?'<div style="margin-top:10px;border-radius:8px;padding:9px 12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.22);display:flex;align-items:flex-start;gap:8px;font-size:11px;color:#ef4444;font-weight:600"><span style="flex-shrink:0;font-size:13px">&#9888;</span><span>You already have a higher active subscription.<br><span style="font-weight:400;color:var(--ink3)">Expires '+fd(sub.endDate)+'</span></span></div>':'';
     return '<div class="pc g2">'+(p.popular?'<div class="pch"><span class="badge ba">Popular</span></div>':'')+
     (p.period==='Yearly'?'<div class="sv">Save '+fc(saving)+'/yr</div>':'')+
     '<div class="pcn">'+p.name+'</div>'+
     '<div class="pcp"><span class="pcc">Rs.</span><span class="pca">'+p.price.toLocaleString('en-IN')+'</span><span class="pcpr">/'+(p.period==='Yearly'?'year':'month')+'</span></div>'+
     '<ul class="pcfl">'+feats.map(function(f){return '<li class="pcft"><span class="pcfy">&#10003;</span>'+f+'</li>'}).join('')+'</ul>'+
-    '<button class="btn '+(sub&&sub.planId===p.id?'btn-g':'btn-p')+' btn-w" onclick="startPay(\''+p.id+'\')" '+(sub&&sub.planId===p.id?'disabled':'')+'>'+(sub&&sub.planId===p.id?'Current Plan':'Subscribe ->')+'</button>'+
+    lowerBadge+
+    '<button class="btn '+btnClass+' btn-w" onclick="startPay(\''+p.id+'\')" '+btnDisabled+' style="'+(isLower?'opacity:.5;cursor:not-allowed':'')+'">'+btnLabel+'</button>'+
     '</div>';
   }).join('');
 }
@@ -765,14 +1280,43 @@ function rProfile(){
   var u=S.user,sub=S.us(u.id),orders=S.uo(u.id),rem=sub?sub.totalVideos-sub.usedVideos:0,pct=sub?Math.round((rem/sub.totalVideos)*100):0;
   var avatar=S.getAvatar(u.id);
   var avatarDisplay=avatar?'style="background-image:url(\''+avatar+'\');background-size:cover;background-position:center"':'';
-  var html='<div class="ph"><div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">'+
-  '<div class="av" '+avatarDisplay+' style="width:52px;height:52px;font-size:21px;'+(avatar?'':' display:flex;align-items:center;justify-content:center')+' position:relative;cursor:pointer" onclick="editProfilePicture()" title="Click to change profile picture">'+(!avatar?u.name[0].toUpperCase():'')+
-  '<div style="position:absolute;bottom:-2px;right:-2px;width:18px;height:18px;background:var(--ac);border-radius:50%;border:2px solid var(--bg);display:flex;align-items:center;justify-content:center;font-size:10px;color:white">📷</div>'+
+  var accountId=(u.id||'').slice(0,12).toUpperCase();
+  var html='<div class="ph"><div style="display:flex;align-items:center;gap:14px;margin-bottom:6px">'+
+  '<div style="position:relative;cursor:pointer" onclick="editProfilePicture()" title="Change photo">'+
+  '<div class="av" '+avatarDisplay+' style="width:64px;height:64px;font-size:25px;'+(avatar?'':' display:flex;align-items:center;justify-content:center')+'">'+(!avatar?u.name[0].toUpperCase():'')+
   '</div>'+
-  '<div><div style="font-size:19px;font-weight:800;letter-spacing:-.03em">'+u.name+'</div>'+
+  '<div style="position:absolute;bottom:-2px;right:-2px;width:22px;height:22px;background:var(--ac);border-radius:50%;border:2px solid var(--bg);display:flex;align-items:center;justify-content:center;font-size:11px">📷</div>'+
+  '</div>'+
+  '<div>'+
+  '<div style="font-size:19px;font-weight:800;letter-spacing:-.03em">'+u.name+'</div>'+
   '<div style="font-size:11px;color:var(--ink3);font-family:var(--mono);margin-top:2px">'+u.email+'</div>'+
   '<div style="margin-top:6px">'+(sub?'<span class="badge bg">&#10003; '+sub.planName+'</span>':'<span class="badge bn">No plan</span>')+'</div>'+
   '</div></div></div>';
+
+  // Profile Management section
+  html+='<div class="sec"><div class="st">Profile</div>';
+  // Editable name row
+  html+='<div class="prof-edit-row" style="cursor:pointer" onclick="openEditName()">'+
+  '<div style="font-size:19px;margin-right:4px">👤</div>'+
+  '<div style="flex:1"><div class="prof-edit-label">Full Name</div><div class="prof-edit-val">'+u.name+'</div></div>'+
+  '<div style="font-size:10px;font-weight:700;color:var(--ac2);background:var(--acd);border:1px solid rgba(157,113,255,.22);border-radius:6px;padding:3px 9px">Edit</div>'+
+  '</div>';
+  // Non-editable email
+  html+='<div class="prof-edit-row">'+
+  '<div style="font-size:19px;margin-right:4px">✉️</div>'+
+  '<div style="flex:1"><div class="prof-edit-label">Email ID</div><div class="prof-edit-val locked">'+u.email+'</div></div>'+
+  '<div style="font-size:10px;font-weight:600;color:var(--ink3);border:1px solid var(--b1);border-radius:6px;padding:3px 9px">Locked</div>'+
+  '</div>';
+  // Non-editable Account ID
+  html+='<div class="prof-edit-row">'+
+  '<div style="font-size:19px;margin-right:4px">🪪</div>'+
+  '<div style="flex:1"><div class="prof-edit-label">Account ID</div><div class="prof-edit-val"><span class="prof-acc-id">'+accountId+'</span></div></div>'+
+  '<div style="font-size:10px;font-weight:600;color:var(--ink3);border:1px solid var(--b1);border-radius:6px;padding:3px 9px">Auto</div>'+
+  '</div>';
+  // Photo change button
+  html+='<div style="margin-top:10px"><button class="btn btn-g btn-sm" onclick="editProfilePicture()" style="gap:7px">📷 Change Profile Photo</button></div>';
+  html+='</div>';
+
   if(sub){
     html+='<div class="sec"><div class="st">Subscription</div>'+
     '<div style="border-radius:var(--r);padding:18px;background:var(--s1);border:1px solid var(--b1)">'+
@@ -797,6 +1341,9 @@ function rProfile(){
 }
 
 // -- USER MODALS -------------------------------------------
+function rProfileMod(){
+  return '<div class="overlay h" id="aMod"><div class="modal" style="max-width:440px"><div class="mh"><span class="mt" id="aModT">-</span><button class="mx" onclick="hideM(\'aMod\')">&#10005;</button></div><div id="aModB"></div></div></div>';
+}
 function rAnnM(){
   var html='<div class="overlay h" id="mAnn"><div class="modal"><div class="mh"><span class="mt">Announcements</span><button class="mx" onclick="hideM(\'mAnn\')">&#10005;</button></div>';
   if(!S.anns.length){html+='<div class="empty"><div class="eic">&#128227;</div><div class="ett">No announcements</div></div>';}
@@ -946,6 +1493,18 @@ function spStep(n){
 }
 function startPay(pid){
   var plan=S.cfg.plans.find(function(p){return p.id===pid});if(!plan)return;
+  // Guard: prevent downgrade
+  if(S.user){
+    var sub=S.us(S.user.id);
+    if(sub&&sub.planId!==pid&&isDowngrade(sub.planId,pid)){
+      toast('r','Cannot downgrade','You already have a higher active subscription ('+sub.planName+' – expires '+fd(sub.endDate)+')');
+      return;
+    }
+    if(sub&&sub.planId===pid){
+      toast('a','Already subscribed','This is your current active plan');
+      return;
+    }
+  }
   window._ppid=pid;
   $('pyN').textContent=plan.name+' Plan';
   $('pyA').textContent=fc(plan.price);
@@ -963,14 +1522,49 @@ function startPay(pid){
 }
 function openAnyUpi(){
   var plan=S.cfg.plans.find(function(p){return p.id===window._ppid});if(!plan)return;
-  var pa=encodeURIComponent(S.cfg.upiId);
-  var pn=encodeURIComponent('Tushya Kumar Sharma');
-  var tn=encodeURIComponent('ClipGen AI '+plan.name+' '+plan.period);
-  var url='upi://pay?pa='+pa+'&pn='+pn+'&am='+plan.price+'&cu=INR&tn='+tn;
-  var a=document.createElement('a');a.href=url;a.style.display='none';
-  document.body.appendChild(a);a.click();
-  setTimeout(function(){try{document.body.removeChild(a)}catch(e){}},1000);
-  toast('a','Opening UPI App...','Amount '+fc(plan.price)+' pre-filled');
+  // Show confirmation modal before opening UPI
+  var existing=document.getElementById('_upiConfirm');if(existing)existing.remove();
+  var ov=document.createElement('div');
+  ov.id='_upiConfirm';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);backdrop-filter:blur(12px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;animation:fin .17s ease';
+  ov.innerHTML=
+  '<div style="width:100%;max-width:360px;background:var(--bg2);border:1px solid var(--b2);border-radius:20px;padding:26px 22px;box-shadow:0 24px 64px rgba(0,0,0,.6)">'+
+    '<div style="text-align:center;margin-bottom:20px">'+
+      '<div style="width:56px;height:56px;border-radius:16px;background:rgba(157,113,255,.13);border:1px solid rgba(157,113,255,.28);display:flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto 12px">&#9889;</div>'+
+      '<div style="font-size:18px;font-weight:800;letter-spacing:-.02em;margin-bottom:4px">Confirm Payment</div>'+
+      '<div style="font-size:12px;color:var(--ink3);font-weight:400">Review details before opening UPI app</div>'+
+    '</div>'+
+    '<div style="background:var(--s1);border:1px solid var(--b1);border-radius:12px;padding:16px;margin-bottom:16px">'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--b1)"><span style="font-size:11px;color:var(--ink3);font-weight:600">Plan</span><span style="font-weight:700;font-size:13px">'+plan.name+' '+plan.period+'</span></div>'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--b1)"><span style="font-size:11px;color:var(--ink3);font-weight:600">Videos</span><span style="font-weight:700;font-size:13px;font-family:var(--mono)">'+plan.videos+'</span></div>'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--b1)"><span style="font-size:11px;color:var(--ink3);font-weight:600">Pay To</span><span style="font-weight:700;font-size:12px;font-family:var(--mono);color:var(--ac2)">'+S.cfg.upiId+'</span></div>'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0 3px"><span style="font-size:12px;color:var(--ink2);font-weight:600">Total Amount</span><span style="font-weight:800;font-size:26px;font-family:var(--mono);color:var(--ac2)">'+fc(plan.price)+'</span></div>'+
+    '</div>'+
+    '<div style="background:rgba(45,212,160,.08);border:1px solid rgba(45,212,160,.20);border-radius:9px;padding:10px 13px;font-size:11px;color:var(--gr);font-weight:500;display:flex;gap:7px;margin-bottom:16px">'+
+      '<span style="flex-shrink:0">&#10003;</span><span>Amount <strong>'+fc(plan.price)+'</strong> will be pre-filled in your UPI app automatically.</span>'+
+    '</div>'+
+    '<div style="display:flex;flex-direction:column;gap:8px">'+
+      '<button id="_upiGoBtn" style="padding:14px;font-size:14px;border-radius:11px;font-weight:700;background:rgba(157,113,255,.18);border:1px solid rgba(157,113,255,.40);color:var(--ac2);cursor:pointer;font-family:var(--sans);display:flex;align-items:center;justify-content:center;gap:8px;transition:all .15s">'+
+        '<span style="font-size:18px">&#9889;</span> Open UPI App — Pay '+fc(plan.price)+
+      '</button>'+
+      '<button onclick="document.getElementById(\'_upiConfirm\').remove()" style="padding:11px;font-size:13px;border-radius:11px;font-weight:600;background:var(--s1);border:1px solid var(--b1);color:var(--ink2);cursor:pointer;font-family:var(--sans);transition:all .15s">'+
+        'Cancel'+
+      '</button>'+
+    '</div>'+
+  '</div>';
+  document.body.appendChild(ov);
+  ov.addEventListener('click',function(e){if(e.target===ov)ov.remove();});
+  document.getElementById('_upiGoBtn').addEventListener('click',function(){
+    ov.remove();
+    var pa=encodeURIComponent(S.cfg.upiId);
+    var pn=encodeURIComponent('Tushya Kumar Sharma');
+    var tn=encodeURIComponent('ClipGen AI '+plan.name+' '+plan.period);
+    var url='upi://pay?pa='+pa+'&pn='+pn+'&am='+plan.price+'&cu=INR&tn='+tn;
+    var a=document.createElement('a');a.href=url;a.style.display='none';
+    document.body.appendChild(a);a.click();
+    setTimeout(function(){try{document.body.removeChild(a)}catch(e){}},1000);
+    toast('g','Opening UPI App...','Amount '+fc(plan.price)+' pre-filled');
+  });
 }
 function resetPay(){
   [1,2,3,4].forEach(function(i){var el=$('pyS'+i);if(el)el.classList.add('h')});
@@ -1063,8 +1657,13 @@ function rUserPays(){
     '<div style="font-family:var(--mono);font-size:18px;font-weight:500;color:var(--ac2);margin-bottom:4px">'+fc(p.amount||0)+'</div>'+
     '<div style="font-size:10px;color:var(--ink3);font-family:var(--mono)">Submitted '+fd(p.createdAt)+'</div>'+
     '</div></div>'+
-    (isApproved?'<div style="margin-top:12px;border-radius:9px;padding:10px 12px;background:var(--grd);border:1px solid rgba(45,212,160,.20);font-size:12px;font-weight:600;color:var(--gr)">&#10003; Payment approved — your plan is active!</div>':'')+ 
-    (isRejected?'<div style="margin-top:12px;border-radius:9px;padding:10px 12px;background:var(--rdd);border:1px solid rgba(255,107,107,.20);font-size:12px;font-weight:600;color:var(--rd)">&#10005; Payment rejected — please contact support or resubmit.</div><div style="margin-top:8px"><button class="btn btn-p btn-sm" onclick="goto(\'chat\')">Contact Support</button></div>':'')+ 
+    (isApproved?'<div style="margin-top:12px;border-radius:9px;padding:10px 12px;background:var(--grd);border:1px solid rgba(45,212,160,.20);font-size:12px;font-weight:600;color:var(--gr);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px"><span>&#10003; Payment approved — your plan is active!</span><button class="btn btn-s btn-sm" onclick="generateReceipt(\''+p.id+'\',this)" style="font-size:11px;padding:6px 12px;flex-shrink:0">&#128229; Generate Receipt</button></div>':'')+ 
+    (isRejected?'<div style="margin-top:12px;border-radius:9px;padding:12px 14px;background:var(--rdd);border:1px solid rgba(255,107,107,.20)">'+
+    '<div style="font-size:12px;font-weight:700;color:var(--rd);margin-bottom:10px">&#10005; Payment rejected — proof was invalid or could not be verified.</div>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+    '<button class="btn btn-p btn-sm" onclick="retryPay(\''+p.planId+'\')" style="font-size:12px">&#8635; Retry Payment</button>'+
+    '<button class="btn btn-g btn-sm" onclick="goto(\'chat\')" style="font-size:12px">&#128172; Contact Support</button>'+
+    '</div></div>':'')+ 
     (isPending?'<div style="margin-top:12px;border-radius:9px;padding:10px 12px;background:var(--amd);border:1px solid rgba(255,181,71,.20);font-size:12px;font-weight:500;color:var(--am)">&#8987; Under review — admin will verify within 2 hours.</div>':'')+
     '<div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px">'+
     '<div style="background:var(--s2);border-radius:7px;padding:8px 11px"><div style="font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin-bottom:2px">UTR Number</div><div style="font-family:var(--mono);font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(p.utrNumber||'-')+'</div></div>'+
@@ -1088,7 +1687,7 @@ function rChat(){
     }
   }
   if(updated){
-    localStorage.setItem('sas_m',JSON.stringify(S.msgs));
+    
   }
   
   // STEP 2: NOW filter messages for rendering (with updated status)
@@ -1141,7 +1740,7 @@ function sendMsg(){
     readAt:null
   });
   S.msgs=msgs;
-  localStorage.setItem('sas_m',JSON.stringify(S.msgs));
+  
   inp.value='';
   var pg=$('pg-chat');if(pg){pg.innerHTML=rChat();bindChat();}
   toast('g','Message sent','Support team will reply soon');
@@ -1185,7 +1784,7 @@ function updateFloatingChat(){
     }
   }
   if(updated){
-    localStorage.setItem('sas_m',JSON.stringify(S.msgs));
+    
   }
   
   // Show typing indicator briefly if there are new messages
@@ -1249,7 +1848,7 @@ function sendChatMessage(){
     readAt:null
   });
   S.msgs=msgs;
-  localStorage.setItem('sas_m',JSON.stringify(S.msgs));
+  
   
   inp.value='';
   updateFloatingChat();
@@ -1388,7 +1987,7 @@ function rAChat(){
       }
     });
     if(updated){
-      localStorage.setItem('sas_m',JSON.stringify(S.msgs));
+      
     }
     
     html+='<div style="padding:12px 16px;border-bottom:1px solid var(--b1);display:flex;align-items:center;gap:10px;background:var(--bg2);justify-content:space-between"><div style="display:flex;align-items:center;gap:10px"><div class="cav" style="width:32px;height:32px;font-size:13px">'+((selUser&&selUser.name)||'?')[0].toUpperCase()+'</div><div><div style="font-weight:700;font-size:13px">'+((selUser&&selUser.name)||'User')+'</div><div style="font-size:10px;color:var(--ink3)">'+((selUser&&selUser.email)||'')+'</div></div></div><button class="btn btn-d btn-xs" onclick="if(confirm(\'Delete all messages with this user?\')){delUserChat(\''+selId+'\')}">🗑</button></div>';
@@ -1447,7 +2046,7 @@ function adminSendMsg(){
     readAt:null
   });
   S.msgs=msgs;
-  localStorage.setItem('sas_m',JSON.stringify(S.msgs));
+  
   inp.value='';
   swATab('chat');
   toast('g','Replied');
@@ -1570,7 +2169,7 @@ function handleGoogleSignIn(response){
   
   // Login user
   S.user=user;
-  localStorage.setItem('sas_user',JSON.stringify(user));
+  
   toast('g','Logged in with Google!');
   setTimeout(function(){render();},500);
 }
@@ -1614,6 +2213,34 @@ function removeAvatar(){
   toast('a','Profile picture removed');
   setTimeout(function(){render();},500);
   hideM('aMod');
+}
+
+function openEditName(){
+  var u=S.user;
+  var html='<div style="text-align:center;margin-bottom:18px">'+
+  '<div style="font-size:40px;margin-bottom:6px">✏️</div>'+
+  '<div style="font-size:13px;color:var(--ink3);font-weight:400">Update your display name</div></div>'+
+  '<div class="fg"><label class="lbl">Full Name</label><input class="inp" id="editNameInp" value="'+u.name+'" placeholder="Your name" maxlength="48"></div>'+
+  '<button class="btn btn-p btn-w" onclick="saveProfileName()" style="padding:13px">Save Name</button>';
+  $('aModT').textContent='Edit Name';
+  $('aModB').innerHTML=html;
+  showM('aMod');
+  setTimeout(function(){var inp=$('editNameInp');if(inp){inp.focus();inp.select();}},200);
+}
+
+function saveProfileName(){
+  var inp=$('editNameInp');
+  var name=inp&&inp.value.trim();
+  if(!name){toast('r','Name cannot be empty');return;}
+  if(name.length<2){toast('r','Name too short');return;}
+  var users=S.users;
+  var u=users.find(function(u){return u.id===S.user.id});
+  if(u){u.name=name;S.users=users;}
+  S.user.name=name;
+  
+  toast('g','Name updated','Your profile has been updated');
+  hideM('aMod');
+  setTimeout(function(){goto('profile');},300);
 }
 
 
@@ -1674,15 +2301,34 @@ function rAUsr(){
 function rAPay(){
   if(!S.pays.length)return '<div class="empty"><div class="eic">&#128179;</div><div class="ett">No payments yet</div></div>';
   var sm={pending:'by',approved:'bg',rejected:'br'};
-  var html='<div style="font-weight:700;font-size:15px;margin-bottom:14px;letter-spacing:-.01em">Payments ('+S.pays.length+')</div>';
+  var selMode=window._paySelMode||false;
+  var selIds=window._paySelIds||{};
+  var selCount=Object.keys(selIds).filter(function(k){return selIds[k]}).length;
+  var html='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">'+
+  '<span style="font-weight:700;font-size:15px;letter-spacing:-.01em">Payments ('+S.pays.length+')</span>'+
+  '<div style="display:flex;gap:6px">'+
+  (selMode?
+    '<button class="btn btn-d btn-sm" '+(selCount?'onclick="payDelSelected()"':'disabled')+'>&#128465; Delete ('+selCount+')</button>'+
+    '<button class="btn btn-g btn-sm" onclick="payExitSel()">Cancel</button>':
+    '<button class="btn btn-g btn-sm" onclick="payEnterSel()" title="Hold any card to select">&#9745; Select</button>'
+  )+'</div></div>';
+  if(selMode){
+    html+='<div class="pay-sel-bar"><div style="font-size:12px;font-weight:600;color:var(--ac2)">'+
+    (selCount?selCount+' selected':'Tap cards to select')+
+    '</div><button onclick="paySelAll()" style="font-size:11px;font-weight:700;color:var(--ac2);background:var(--acd);border:1px solid rgba(157,113,255,.25);border-radius:6px;padding:4px 10px;cursor:pointer">'+
+    (selCount===S.pays.length?'Deselect All':'Select All')+'</button></div>';
+  }
   html+=S.pays.slice().reverse().map(function(p){
     var utrOk=p.utrNumber&&p.utrNumber.length>4;
     var txnOk=p.transactionId&&p.transactionId.length>4;
     var hasSS=p.screenshotData&&p.screenshotData.length>10;
-    return '<div style="border-radius:var(--r);background:var(--s1);border:1px solid var(--b1);padding:16px;margin-bottom:12px">'+
+    var isSel=!!(selMode&&selIds[p.id]);
+    var cardClick=selMode?'onclick="togglePaySel(\''+p.id+'\')"':'';
+    var longPressAttrs='ontouchstart="window._payTS=Date.now();window._payTId=\''+p.id+'\'" ontouchend="checkPayLongPress(\''+p.id+'\')" oncontextmenu="payCtxMenu(event,\''+p.id+'\')"';
+    return '<div class="pay-card'+(selMode?' select-mode':'')+(isSel?' selected':'')+'" id="paycard-'+p.id+'" '+cardClick+' '+longPressAttrs+'>'+
+    (selMode?'<div class="pay-sel-cb">'+(isSel?'&#10003;':'')+'</div>':'')+
     '<div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap">'+
-    // Screenshot column
-    (hasSS?'<div style="flex-shrink:0;cursor:pointer" onclick="viewSS(\''+p.id+'\')"><img src="'+p.screenshotData+'" style="width:72px;height:72px;object-fit:cover;border-radius:9px;border:1.5px solid var(--b2);display:block"><div style="font-size:9px;font-weight:700;color:var(--ac2);text-align:center;margin-top:3px;letter-spacing:.04em">VIEW</div></div>':'<div style="width:72px;height:72px;border-radius:9px;border:1.5px dashed var(--b2);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-size:22px;opacity:.3">&#128247;</span></div>')+
+    (hasSS?'<div style="flex-shrink:0;cursor:pointer" onclick="'+(selMode?'togglePaySel(\''+p.id+'\')':'viewSS(\''+p.id+'\')')+';event.stopPropagation()"><img src="'+p.screenshotData+'" style="width:72px;height:72px;object-fit:cover;border-radius:9px;border:1.5px solid var(--b2);display:block"><div style="font-size:9px;font-weight:700;color:var(--ac2);text-align:center;margin-top:3px;letter-spacing:.04em">'+(selMode?'':'VIEW')+'</div></div>':'<div style="width:72px;height:72px;border-radius:9px;border:1.5px dashed var(--b2);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-size:22px;opacity:.3">&#128247;</span></div>')+
     '<div style="flex:1;min-width:0">'+
     '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">'+
     '<span style="font-weight:800;font-size:14px">'+p.userName+'</span>'+
@@ -1695,10 +2341,51 @@ function rAPay(){
     '<div style="background:var(--s2);border-radius:7px;padding:9px 11px"><div style="font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin-bottom:3px">UTR Number</div><div style="font-family:var(--mono);font-size:11px;font-weight:700;color:'+(utrOk?'var(--gr)':'var(--rd)')+'">'+( p.utrNumber||'Missing !')+'</div></div>'+
     '<div style="background:var(--s2);border-radius:7px;padding:9px 11px"><div style="font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);margin-bottom:3px">Transaction ID</div><div style="font-family:var(--mono);font-size:11px;font-weight:700;color:'+(txnOk?'var(--gr)':'var(--rd)')+'">'+( p.transactionId||'Missing !')+'</div></div>'+
     '</div>'+
-    (p.status==='pending'?'<div style="display:flex;gap:8px"><button class="btn btn-s btn-sm" onclick="appPay(\''+p.id+'\')">&#10003; Approve</button><button class="btn btn-d btn-sm" onclick="rejPay(\''+p.id+'\')">&#10005; Reject</button>'+((!utrOk||!txnOk||!hasSS)?'<span style="font-size:11px;color:var(--am);align-self:center;font-weight:600">! Incomplete proof</span>':'')+'</div>':'<span style="font-size:11px;color:var(--ink3)">Decision: '+p.status+'</span>')+
+    (!selMode?(p.status==='pending'?'<div style="display:flex;gap:8px"><button class="btn btn-s btn-sm" onclick="appPay(\''+p.id+'\');event.stopPropagation()">&#10003; Approve</button><button class="btn btn-d btn-sm" onclick="rejPay(\''+p.id+'\');event.stopPropagation()">&#10005; Reject</button>'+((!utrOk||!txnOk||!hasSS)?'<span style="font-size:11px;color:var(--am);align-self:center;font-weight:600">! Incomplete proof</span>':'')+'</div>':'<span style="font-size:11px;color:var(--ink3)">Decision: '+p.status+'</span>'):'')+
     '</div></div></div>';
   }).join('');
   return html;
+}
+// Payment selection helpers
+function payEnterSel(){window._paySelMode=true;window._paySelIds={};swATab('payments')}
+function payExitSel(){window._paySelMode=false;window._paySelIds={};swATab('payments')}
+function togglePaySel(id){
+  if(!window._paySelIds)window._paySelIds={};
+  window._paySelIds[id]=!window._paySelIds[id];
+  swATab('payments');
+}
+function paySelAll(){
+  if(!window._paySelIds)window._paySelIds={};
+  var all=S.pays;
+  var selCount=Object.keys(window._paySelIds).filter(function(k){return window._paySelIds[k]}).length;
+  if(selCount===all.length){window._paySelIds={};}
+  else{all.forEach(function(p){window._paySelIds[p.id]=true;});}
+  swATab('payments');
+}
+function payDelSelected(){
+  var ids=window._paySelIds||{};
+  var toDelete=Object.keys(ids).filter(function(k){return ids[k]});
+  if(!toDelete.length){toast('a','No payments selected');return;}
+  if(!confirm('Delete '+toDelete.length+' payment record'+(toDelete.length>1?'s':'')+' permanently?'))return;
+  S.pays=S.pays.filter(function(p){return !ids[p.id]});
+  window._paySelMode=false;window._paySelIds={};
+  toast('a','Deleted '+toDelete.length+' payment'+(toDelete.length>1?'s':''));
+  swATab('payments');
+}
+function checkPayLongPress(id){
+  if(Date.now()-(window._payTS||0)>480){
+    if(!window._paySelMode){window._paySelMode=true;window._paySelIds={};}
+    if(!window._paySelIds)window._paySelIds={};
+    window._paySelIds[id]=true;
+    swATab('payments');
+  }
+}
+function payCtxMenu(e,id){
+  e.preventDefault();
+  if(!window._paySelMode){window._paySelMode=true;window._paySelIds={};}
+  if(!window._paySelIds)window._paySelIds={};
+  window._paySelIds[id]=true;
+  swATab('payments');
 }
 function viewSS(pid){
   var p=S.pays.find(function(p){return p.id===pid});if(!p||!p.screenshotData)return;
@@ -1927,9 +2614,409 @@ function delAnn(id){S.anns=S.anns.filter(function(a){return a.id!==id});toast('a
 function saveUpi(){var u=$('cfgUpi')&&$('cfgUpi').value.trim();if(!u){toast('r','Enter UPI ID');return}var cfg=S.cfg;cfg.upiId=u;S.cfg=cfg;toast('g','UPI ID updated',u)}
 function clearData(){if(!confirm('Delete ALL user data? Admin account stays.'))return;if(!confirm('This is permanent and cannot be undone. Confirm?'))return;S.orders=[];S.subs=[];S.pays=[];S.anns=[];S.vids=[];S.users=S.users.filter(function(u){return u.isAdmin});if(window._thumbData)window._thumbData={};toast('a','All data cleared');swATab('overview')}
 
+function retryPay(planId){
+  // Show confirmation before retry
+  var plan=S.cfg.plans.find(function(p){return p.id===planId});
+  if(!plan){toast('r','Plan not found');return;}
+  var existing=document.getElementById('_retryConfirm');if(existing)existing.remove();
+  var ov=document.createElement('div');
+  ov.id='_retryConfirm';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.72);backdrop-filter:blur(12px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;animation:fin .17s ease';
+  ov.innerHTML=
+  '<div style="width:100%;max-width:360px;background:var(--bg2);border:1px solid var(--b2);border-radius:20px;padding:26px 22px;box-shadow:0 24px 64px rgba(0,0,0,.6)">'+
+    '<div style="text-align:center;margin-bottom:20px">'+
+      '<div style="width:56px;height:56px;border-radius:16px;background:var(--amd);border:1px solid rgba(255,181,71,.28);display:flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto 12px">&#8635;</div>'+
+      '<div style="font-size:18px;font-weight:800;letter-spacing:-.02em;margin-bottom:4px">Retry Payment</div>'+
+      '<div style="font-size:12px;color:var(--ink3);font-weight:400">This will start a fresh checkout for the same plan</div>'+
+    '</div>'+
+    '<div style="background:var(--s1);border:1px solid var(--b1);border-radius:12px;padding:14px;margin-bottom:14px">'+
+      '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--b1)"><span style="font-size:11px;color:var(--ink3);font-weight:600">Plan</span><span style="font-weight:700;font-size:13px">'+plan.name+' '+plan.period+'</span></div>'+
+      '<div style="display:flex;justify-content:space-between;padding:8px 0 3px"><span style="font-size:12px;color:var(--ink2);font-weight:600">Amount</span><span style="font-weight:800;font-size:22px;font-family:var(--mono);color:var(--ac2)">'+fc(plan.price)+'</span></div>'+
+    '</div>'+
+    '<div style="background:rgba(255,181,71,.08);border:1px solid rgba(255,181,71,.22);border-radius:9px;padding:10px 13px;font-size:11px;color:var(--am);font-weight:500;display:flex;gap:7px;margin-bottom:16px">'+
+      '<span style="flex-shrink:0">!</span><span>Make sure your payment screenshot is <strong>clear and complete</strong> before submitting.</span>'+
+    '</div>'+
+    '<div style="display:flex;flex-direction:column;gap:8px">'+
+      '<button id="_retryGoBtn" style="padding:13px;font-size:14px;border-radius:11px;font-weight:700;background:rgba(157,113,255,.18);border:1px solid rgba(157,113,255,.40);color:var(--ac2);cursor:pointer;font-family:var(--sans);transition:all .15s">&#8635; Start Fresh Checkout</button>'+
+      '<button onclick="document.getElementById(\'_retryConfirm\').remove()" style="padding:11px;font-size:13px;border-radius:11px;font-weight:600;background:var(--s1);border:1px solid var(--b1);color:var(--ink2);cursor:pointer;font-family:var(--sans);transition:all .15s">Cancel</button>'+
+    '</div>'+
+  '</div>';
+  document.body.appendChild(ov);
+  ov.addEventListener('click',function(e){if(e.target===ov)ov.remove();});
+  document.getElementById('_retryGoBtn').addEventListener('click',function(){
+    ov.remove();
+    // Close payments page and open checkout
+    hideM('mPay');
+    startPay(planId);
+  });
+}
+
+// -- REAL QR CODE GENERATOR (pure JS, no CDN, fully scannable) --
+// Based on QR spec: byte mode, ECC-M, versions 1-10
+var _QR=(function(){
+"use strict";
+var GF=[];var LOG=[];
+(function(){var x=1;for(var i=0;i<255;i++){LOG[i]=x;GF[x]=i;x<<=1;if(x&256)x^=285;}})();
+function gfmul(a,b){if(a===0||b===0)return 0;return LOG[(GF[a]+GF[b])%255];}
+function gfpow(x,p){return LOG[((GF[x]||0)*p)%255];}
+function gfpoly(ec){
+  var p=[1];
+  for(var i=0;i<ec;i++){var q=[1,LOG[i]];var r=[];for(var a=0;a<p.length+1;a++){var s=0;if(a<p.length)s^=gfmul(p[a],1);if(a>0)s^=gfmul(p[a-1],LOG[i]);r.push(s);}p=r;}
+  return p;
+}
+function rs(data,ec){
+  var gen=gfpoly(ec);var msg=data.concat(new Array(ec).fill(0));
+  for(var i=0;i<data.length;i++){var c=msg[i];if(c!==0)for(var j=0;j<gen.length;j++)msg[i+j]^=gfmul(gen[j],c);}
+  return msg.slice(data.length);
+}
+var CAPS=[[],[17,7],[32,10],[53,15],[78,20],[106,26],[134,18],[154,20],[192,24],[230,30],[271,18]];
+function version(n){for(var v=1;v<=10;v++)if(CAPS[v][0]>=n)return v;}
+function matrix(v){var s=v*4+17;var m=[];for(var i=0;i<s;i++){m.push(new Array(s).fill(null));}return m;}
+function setMod(m,r,c,v){if(m[r][c]===null)m[r][c]=v;}
+function finder(m,r,c){
+  for(var i=-1;i<=7;i++)for(var j=-1;j<=7;j++){
+    var rr=r+i,cc=c+j;if(rr<0||cc<0||rr>=m.length||cc>=m.length)continue;
+    var on=(i>=0&&i<=6&&(i===0||i===6||j===0||j===6||(i>=2&&i<=4&&j>=2&&j<=4)));
+    m[rr][cc]=(i===-1||j===-1||i===7||j===7)?false:on;
+  }
+}
+function timing(m,v){var s=v*4+17;for(var i=8;i<s-8;i++){m[6][i]=m[6][i]===null?(i%2===0):m[6][i];m[i][6]=m[i][6]===null?(i%2===0):m[i][6];}}
+function align(m,v){
+  var pos=[[],[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50]];
+  if(v<2)return;var p=pos[v];
+  for(var a=0;a<p.length;a++)for(var b=0;b<p.length;b++){
+    var r=p[a],c=p[b];if(m[r][c]!==null)continue;
+    for(var i=-2;i<=2;i++)for(var j=-2;j<=2;j++)m[r+i][c+j]=(i===-2||i===2||j===-2||j===2||(i===0&&j===0));
+  }
+}
+function formatBits(m,mask){
+  var ec=2;// M
+  var data=((ec<<3)|mask);
+  var g=0x537;var d=data<<10;
+  for(var i=14;i>=10;i--)if(d&(1<<i))d^=g<<(i-10);
+  var bits=(data<<10|d)^0x5412;
+  var locs=[[8,0],[8,1],[8,2],[8,3],[8,4],[8,5],[8,7],[8,8],[7,8],[5,8],[4,8],[3,8],[2,8],[1,8],[0,8]];
+  var s=m.length;
+  for(var k=0;k<15;k++){var b=(bits>>(14-k))&1;m[locs[k][0]][locs[k][1]]=b;m[s-1-Math.min(k,6)-(k>=7?1:0)][8]=b;m[8][s-8+Math.min(k,7)-(k>=8?s-15:0)]=b;}
+  m[s-8][8]=true;
+}
+function maskFn(p,r,c){
+  if(p===0)return(r+c)%2===0;if(p===1)return r%2===0;if(p===2)return c%3===0;if(p===3)return(r+c)%3===0;
+  if(p===4)return(Math.floor(r/2)+Math.floor(c/3))%2===0;if(p===5)return(r*c)%2+(r*c)%3===0;
+  if(p===6)return((r*c)%2+(r*c)%3)%2===0;return((r+c)%2+(r*c)%3)%2===0;
+}
+function placeData(m,bits){
+  var s=m.length;var idx=0;var up=true;
+  for(var col=s-1;col>=0;col-=2){
+    if(col===6)col--;
+    for(var row=0;row<s;row++){
+      var r=up?(s-1-row):row;
+      for(var side=0;side<2;side++){
+        var c=col-side;
+        if(m[r][c]===null){m[r][c]=idx<bits.length?((bits[idx]>>(7-(idx)%8))&1?true:false):false;idx++;}
+      }
+    }
+    up=!up;
+  }
+}
+function applyMask(m,p){var s=m.length;var out=[];for(var r=0;r<s;r++){out.push([]);for(var c=0;c<s;c++){out[r].push(typeof m[r][c]==='boolean'&&maskFn(p,r,c)?!m[r][c]:m[r][c]);}}return out;}
+function penalty(m){
+  var s=m.length;var pen=0;
+  for(var r=0;r<s;r++){for(var c=0;c<s-4;c++){var same=1;for(var k=1;k<5;k++)if(m[r][c+k]===m[r][c])same++;else break;if(same>=5)pen+=same-2;}}
+  for(var c2=0;c2<s;c2++){for(var r2=0;r2<s-4;r2++){var same2=1;for(var k2=1;k2<5;k2++)if(m[r2+k2][c2]===m[r2][c2])same2++;else break;if(same2>=5)pen+=same2-2;}}
+  return pen;
+}
+function encode(text){
+  var bytes=[];for(var i=0;i<text.length;i++)bytes.push(text.charCodeAt(i)&0xff);
+  var v=version(bytes.length+3);if(!v)return null;
+  var ec=CAPS[v][1];
+  var bits=[];
+  // Mode indicator: byte=0100
+  bits=bits.concat([0,1,0,0]);
+  // Char count
+  var cclen=v<10?8:16;
+  for(var b=cclen-1;b>=0;b--)bits.push((bytes.length>>b)&1);
+  // Data
+  for(var j=0;j<bytes.length;j++)for(var k=7;k>=0;k--)bits.push((bytes[j]>>k)&1);
+  // Terminator
+  for(var t=0;t<4&&bits.length<(CAPS[v][0]-ec)*8;t++)bits.push(0);
+  while(bits.length%8!==0)bits.push(0);
+  var pad=[0xEC,0x11];var pi=0;
+  while(bits.length<(CAPS[v][0]-ec)*8){for(var pp=0;pp<8;pp++)bits.push((pad[pi%2]>>(7-pp))&1);pi++;}
+  // Build byte array
+  var dataBytes=[];for(var d=0;d<bits.length;d+=8){var byte=0;for(var bb=0;bb<8;bb++)byte=(byte<<1)|bits[d+bb];dataBytes.push(byte);}
+  var ecBytes=rs(dataBytes,ec);
+  var allBits=[];
+  for(var db=0;db<dataBytes.length;db++)for(var dbb=7;dbb>=0;dbb--)allBits.push((dataBytes[db]>>dbb)&1);
+  for(var eb=0;eb<ecBytes.length;eb++)for(var ebb=7;ebb>=0;ebb--)allBits.push((ecBytes[eb]>>ebb)&1);
+  // Build matrix
+  var best=null,bestPen=Infinity;
+  for(var mask=0;mask<8;mask++){
+    var m=matrix(v);
+    finder(m,0,0);finder(m,m.length-7,0);finder(m,0,m.length-7);
+    timing(m,v);align(m,v);
+    var mCopy=m.map(function(row){return row.slice();});
+    placeData(mCopy,allBits);
+    formatBits(mCopy,mask);
+    var masked=applyMask(mCopy,mask);
+    formatBits(masked,mask);
+    var pen=penalty(masked);
+    if(pen<bestPen){bestPen=pen;best=masked;}
+  }
+  return best;
+}
+function make(text,size,dark,light){
+  try{
+    var m=encode(text);if(!m)return '';
+    var s=m.length;var quiet=4;
+    var total=s+quiet*2;var mod=Math.floor(size/total);if(mod<1)mod=1;
+    var px=mod*total;
+    var c=document.createElement('canvas');c.width=px;c.height=px;
+    var ctx=c.getContext('2d');
+    ctx.fillStyle=light||'#ffffff';ctx.fillRect(0,0,px,px);
+    ctx.fillStyle=dark||'#000000';
+    for(var r=0;r<s;r++)for(var cc=0;cc<s;cc++)if(m[r][cc])ctx.fillRect((cc+quiet)*mod,(r+quiet)*mod,mod,mod);
+    return c.toDataURL('image/png');
+  }catch(e){return '';}
+}
+return{make:make};
+})();
+
+// -- PDF RECEIPT -------------------------------------------
+function generateReceipt(payId, btnEl) {
+  var p=S.pays.find(function(x){return x.id===payId});
+  if(!p||p.status!=='approved'){toast('r','Receipt only for approved payments');return;}
+
+  // --- Show loading overlay ---
+  var ov=document.createElement('div');
+  ov.id='_rcptOv';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.80);backdrop-filter:blur(14px);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px';
+  ov.innerHTML=
+  '<div style="width:100%;max-width:320px;background:var(--bg2);border:1px solid var(--b2);border-radius:20px;padding:28px 24px;text-align:center;box-shadow:0 24px 64px rgba(0,0,0,.7)">'+
+    '<div style="font-size:40px;margin-bottom:14px">🧾</div>'+
+    '<div style="font-size:17px;font-weight:800;letter-spacing:-.02em;margin-bottom:4px" id="_rcptOvTitle">Generating Receipt</div>'+
+    '<div style="font-size:12px;color:var(--ink3);margin-bottom:20px" id="_rcptOvSub">Please wait...</div>'+
+    '<div style="background:var(--s2);border-radius:100px;height:6px;overflow:hidden;margin-bottom:10px">'+
+      '<div id="_rcptBar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--ac),var(--ac2));border-radius:100px;transition:width .3s ease"></div>'+
+    '</div>'+
+    '<div id="_rcptPct" style="font-size:11px;font-weight:700;color:var(--ac2);font-family:var(--mono)">0%</div>'+
+  '</div>';
+  document.body.appendChild(ov);
+
+  function setProgress(pct, label) {
+    var bar=document.getElementById('_rcptBar');
+    var pctEl=document.getElementById('_rcptPct');
+    var sub=document.getElementById('_rcptOvSub');
+    if(bar) bar.style.width=pct+'%';
+    if(pctEl) pctEl.textContent=pct+'%';
+    if(sub&&label) sub.textContent=label;
+  }
+
+  function fail(msg) {
+    var existing=document.getElementById('_rcptOv');
+    if(existing) existing.remove();
+    var tmp=document.getElementById('_rcpt_tmp');
+    if(tmp) tmp.remove();
+    toast('r','Receipt failed', msg||'Try again');
+    if(btnEl){btnEl.disabled=false;btnEl.innerHTML='&#128229; Generate Receipt';}
+  }
+
+  // Disable button
+  if(btnEl){btnEl.disabled=true;btnEl.innerHTML='&#8987; Generating...';}
+
+  setProgress(5,'Preparing data...');
+
+  var sub=S.subs.find(function(s){return s.userId===p.userId&&s.planId===p.planId});
+  var plan=S.cfg.plans.find(function(pl){return pl.id===p.planId});
+  var user=S.users.find(function(u){return u.id===p.userId})||S.user;
+  var avatar=S.getAvatar(p.userId);
+
+  var invNum='CGAI-INV-'+new Date(p.createdAt).getFullYear()+'-'+String(Math.abs(payId.split('').reduce(function(a,c){return a+c.charCodeAt(0)},0)%9000)+1000).slice(0,4);
+  var rcptNum='CGAI-RCPT-'+payId.slice(0,8).toUpperCase();
+
+  var paidDate=new Date(p.createdAt);
+  var dateStr=paidDate.toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'});
+  var timeStr=paidDate.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  var startDate=sub?new Date(sub.startDate):paidDate;
+  var endDate=sub?new Date(sub.endDate):new Date(paidDate.getTime()+(plan&&plan.period==='Yearly'?365:30)*86400000);
+  var startStr=startDate.toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'});
+  var endStr=endDate.toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'});
+  var days=Math.round((endDate-startDate)/86400000);
+
+  var planFeatures=plan?[
+    plan.videos+' videos/'+(plan.period==='Yearly'?'year':'month'),
+    'All video types (Shorts, Reels, Quiz, Educational)',
+    'Hindi, English & Hinglish support',
+    plan.name==='Pro'?'Priority 24h delivery':'Standard 48h delivery',
+    'Caption + Script included'
+  ]:['Subscription plan'];
+
+  var qrText=[
+    'CLIPGEN AI - PAYMENT RECEIPT',
+    'Name: '+(p.userName||'-'),
+    'Plan: '+(p.planName||'-')+' | AMT: '+fc(p.amount||0),
+    'Status: PAYMENT SUCCESSFUL',
+    'INV: '+invNum,
+    'TXN: '+(p.transactionId||'-'),
+    'UTR: '+(p.utrNumber||'-'),
+    'DATE: '+dateStr,
+    'Verified by Tushya Sharma (Founder)',
+    'Support: '+ADMIN_EMAIL
+  ].join('\n');
+
+  setProgress(15,'Building receipt...');
+
+  // Build receipt div
+  var div=document.createElement('div');
+  div.id='_rcpt_tmp';
+  div.style.cssText='position:fixed;left:-9999px;top:0;width:794px;background:#fff;font-family:Arial,sans-serif;color:#1a1a2e;z-index:-1;';
+
+  var avatarHtml = avatar
+    ? '<img src="'+avatar+'" style="width:52px;height:52px;border-radius:50%;object-fit:cover;border:2px solid #9D71FF;vertical-align:middle">'
+    : '<div style="width:52px;height:52px;border-radius:50%;background:#e8e4ff;display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:22px;color:#7C3AED;vertical-align:middle">'+(p.userName||'U')[0].toUpperCase()+'</div>';
+
+  div.innerHTML =
+  // HEADER
+  '<div style="background:linear-gradient(135deg,#6C3CE1 0%,#9D71FF 100%);padding:36px 44px 28px;color:#fff;">'+
+    '<table width="100%" cellpadding="0" cellspacing="0"><tr>'+
+      '<td><table cellpadding="0" cellspacing="0"><tr>'+
+        '<td style="width:60px"><div style="width:52px;height:52px;border-radius:14px;background:rgba(255,255,255,.18);text-align:center;line-height:52px;font-size:26px;">🎬</div></td>'+
+        '<td style="padding-left:14px"><div style="font-size:24px;font-weight:800;">ClipGen AI</div><div style="font-size:12px;opacity:.8;margin-top:2px;">Unlock Video Success</div></td>'+
+      '</tr></table></td>'+
+      '<td align="right"><div style="font-size:11px;opacity:.7;letter-spacing:.08em;text-transform:uppercase;">Payment Receipt</div><div style="font-size:13px;font-weight:700;margin-top:4px;font-family:monospace;">'+rcptNum+'</div></td>'+
+    '</tr></table>'+
+    '<div style="margin-top:18px;font-size:11px;opacity:.75;">📧 '+ADMIN_EMAIL+'&nbsp;&nbsp;&nbsp;💳 tushyasharma@fam</div>'+
+  '</div>'+
+  // STATUS
+  '<div style="background:#f0fdf4;border-left:5px solid #22c55e;padding:14px 44px;display:flex;align-items:center;gap:12px;">'+
+    '<div style="width:10px;height:10px;border-radius:50%;background:#22c55e;display:inline-block;margin-right:8px;"></div>'+
+    '<span style="font-weight:800;font-size:15px;color:#166534;letter-spacing:.04em;">✅ PAYMENT SUCCESSFUL</span>'+
+  '</div>'+
+  // GRID ROW 1
+  '<table width="100%" cellpadding="0" cellspacing="0" style="padding:28px 44px 0;"><tr>'+
+    '<td width="48%" valign="top">'+
+      '<div style="background:#f8f7ff;border-radius:12px;padding:20px;border:1px solid #e8e4ff;">'+
+        '<div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#7C3AED;margin-bottom:14px;">📄 Invoice Information</div>'+
+        _rcRow('Invoice Number',invNum)+_rcRow('Receipt ID',rcptNum)+_rcRow('Transaction ID',p.transactionId||'-')+_rcRow('UTR Number',p.utrNumber||'-')+_rcRow('Date',dateStr)+_rcRow('Time',timeStr)+
+      '</div>'+
+    '</td>'+
+    '<td width="4%"></td>'+
+    '<td width="48%" valign="top">'+
+      '<div style="background:#f8f7ff;border-radius:12px;padding:20px;border:1px solid #e8e4ff;">'+
+        '<div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#7C3AED;margin-bottom:14px;">👤 Customer Details</div>'+
+        '<div style="margin-bottom:12px;">'+avatarHtml+'<span style="font-weight:700;font-size:13px;margin-left:10px;vertical-align:middle;">'+p.userName+'</span></div>'+
+        _rcRow('Customer Name',p.userName)+_rcRow('Email ID',(user&&user.email)||'-')+_rcRow('Account ID',p.userId.slice(0,12).toUpperCase())+
+      '</div>'+
+    '</td>'+
+  '</tr></table>'+
+  // GRID ROW 2
+  '<table width="100%" cellpadding="0" cellspacing="0" style="padding:20px 44px 0;"><tr>'+
+    '<td width="48%" valign="top">'+
+      '<div style="background:#f0fdf4;border-radius:12px;padding:20px;border:1px solid #bbf7d0;">'+
+        '<div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#166534;margin-bottom:14px;">📦 Subscription Details</div>'+
+        _rcRow('Plan Name',(p.planName||'-')+' Plan')+
+        '<div style="margin-bottom:8px;padding-top:4px;"><div style="font-size:10px;color:#666;margin-bottom:4px;font-weight:600;">Plan Features</div>'+
+        planFeatures.map(function(f){return '<div style="font-size:11px;color:#1a1a2e;margin-bottom:2px;">✓ '+f+'</div>';}).join('')+
+        '</div>'+
+        _rcRow('Duration',days+' Days ('+( plan&&plan.period||'-')+')')+_rcRow('Start Date',startStr)+_rcRow('Expiry Date',endStr)+
+      '</div>'+
+    '</td>'+
+    '<td width="4%"></td>'+
+    '<td width="48%" valign="top">'+
+      '<div style="background:#fffbeb;border-radius:12px;padding:20px;border:1px solid #fde68a;">'+
+        '<div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#92400e;margin-bottom:14px;">💰 Payment Details</div>'+
+        '<div style="font-size:32px;font-weight:800;color:#7C3AED;font-family:monospace;margin-bottom:14px;">'+fc(p.amount||0)+'</div>'+
+        _rcRow('Payment Method','UPI')+_rcRow('Paid To UPI','tushyasharma@fam')+_rcRow('Paid To Name','Tushya Kumar Sharma')+_rcRow('Status','✅ APPROVED')+
+      '</div>'+
+    '</td>'+
+  '</tr></table>'+
+  // INFO ROW
+  '<table width="100%" cellpadding="0" cellspacing="0" style="padding:20px 44px 24px;"><tr>'+
+    '<td width="100%" valign="top">'+
+      '<div style="background:#fef2f2;border-radius:12px;padding:20px;border:1px solid #fecaca;">'+
+        '<div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#991b1b;margin-bottom:12px;">ℹ️ Important Information</div>'+
+        ['Auto-generated receipt from ClipGen AI.',
+         'Subscription activated successfully.',
+         'Keep this receipt for future reference.',
+         'Support: '+ADMIN_EMAIL].map(function(t){return '<div style="font-size:11px;color:#555;margin-bottom:7px;">• '+t+'</div>';}).join('')+
+      '</div>'+
+    '</td>'+
+  '</tr></table>'+
+  // FOOTER
+  '<div style="background:#1a1a2e;padding:18px 44px;">'+
+    '<table width="100%" cellpadding="0" cellspacing="0"><tr>'+
+      '<td style="color:rgba(255,255,255,.5);font-size:10px;">© '+new Date().getFullYear()+' ClipGen AI — All rights reserved</td>'+
+      '<td align="right" style="color:rgba(255,255,255,.5);font-size:10px;">'+rcptNum+' | '+dateStr+'</td>'+
+    '</tr></table>'+
+  '</div>';
+
+  document.body.appendChild(div);
+  setProgress(30,'Rendering receipt...');
+
+  // Render receipt
+  setTimeout(function(){
+    function proceedWithQR(){
+      setProgress(50,'Rendering receipt...');
+      setTimeout(function(){
+        if(typeof html2canvas==='undefined'){fail('html2canvas not loaded');return;}
+        html2canvas(div,{
+          scale:2,useCORS:true,allowTaint:true,backgroundColor:'#ffffff',logging:false,
+          onclone:function(){setProgress(65,'Capturing layout...');}
+        }).then(function(canvas){
+          setProgress(82,'Creating PDF...');
+          setTimeout(function(){
+            try{
+              var jsPDF=window.jspdf.jsPDF;
+              var imgData=canvas.toDataURL('image/jpeg',0.95);
+              var pdf=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
+              var pgW=pdf.internal.pageSize.getWidth();
+              var pgH=pdf.internal.pageSize.getHeight();
+              var imgW=pgW;
+              var imgH=(canvas.height*pgW)/canvas.width;
+              var yOff=0;
+              while(yOff<imgH){
+                if(yOff>0)pdf.addPage();
+                pdf.addImage(imgData,'JPEG',0,-yOff,imgW,imgH,undefined,'FAST');
+                yOff+=pgH;
+              }
+              setProgress(96,'Saving file...');
+              setTimeout(function(){
+                pdf.save('ClipGenAI-Receipt-'+rcptNum+'.pdf');
+                var o=document.getElementById('_rcptOv');if(o)o.remove();
+                var t=document.getElementById('_rcpt_tmp');if(t)t.remove();
+                if(btnEl){
+                  btnEl.disabled=false;
+                  btnEl.style.background='rgba(45,212,160,.18)';
+                  btnEl.style.borderColor='rgba(45,212,160,.40)';
+                  btnEl.style.color='var(--gr)';
+                  btnEl.innerHTML='&#10003; Download Receipt Again';
+                  btnEl.onclick=function(){generateReceipt(payId,btnEl);};
+                }
+                toast('g','Receipt downloaded!',rcptNum+'.pdf');
+              },200);
+            }catch(e){fail('PDF creation failed: '+e.message);}
+          },100);
+        }).catch(function(e){fail('Render failed: '+e.message);});
+      },400);
+    }
+
+    proceedWithQR();
+  },400);
+}
+
+function downloadReceipt(payId){
+  // Legacy alias — find button and call generateReceipt
+  var btn=event&&event.target;
+  generateReceipt(payId, btn||null);
+}
+
+function _rcRow(label,val){
+  return '<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(0,0,0,.06)"><span style="font-size:10px;color:#888;font-weight:600">'+label+'</span><span style="font-size:11px;font-weight:700;font-family:monospace;text-align:right;max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+val+'</span></div>';
+}
+
 // -- BOOT --------------------------------------------------
+// S.init() is async — it loads Firebase data before rendering
 S.init();
-render();
 </script>
 </body>
 </html>
