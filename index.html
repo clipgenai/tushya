@@ -436,7 +436,7 @@ textarea.inp{resize:vertical;min-height:86px}
 .chat-btn{position:fixed;bottom:84px;right:18px;width:52px;height:52px;border-radius:50%;background:var(--ac);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 4px 20px rgba(157,113,255,.45);transition:all .2s var(--ease);z-index:300}
 .chat-btn:hover{transform:scale(1.08);box-shadow:0 8px 24px rgba(157,113,255,.4)}
 .chat-btn:active{transform:scale(.95)}
-.chat-badge{position:absolute;top:-6px;right:-6px;background:var(--rd);color:white;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;border:2px solid var(--bg);min-width:24px;display:none}
+.chat-badge{position:absolute;top:-6px;right:-6px;background:var(--rd);color:white;border-radius:50%;width:24px;height:24px;align-items:center;justify-content:center;font-size:11px;font-weight:700;border:2px solid var(--bg);min-width:24px;display:none}
 .chat-badge.show{display:flex}
 
 
@@ -1929,25 +1929,7 @@ document.addEventListener('DOMContentLoaded',function(){
 });
 
 // Update chat badge with unread message count
-function updateChatBadge(){
-  var unreadCount=0;
-  for(var i=0;i<S.msgs.length;i++){
-    var m=S.msgs[i];
-    if(m.userId==='_adm'&&m.toId===S.user.id&&m.status!=='viewed'){
-      unreadCount++;
-    }
-  }
-  
-  var badge=$('chatBadge');
-  if(badge){
-    if(unreadCount>0){
-      badge.textContent=unreadCount;
-      badge.classList.add('show');
-    }else{
-      badge.classList.remove('show');
-    }
-  }
-}
+// updateChatBadge is defined below near the real-time listeners section
 
 // Show typing indicator
 function showTypingIndicator(){
@@ -3152,7 +3134,7 @@ var SharePages=(function(){
       document.title=(v.title||'Video')+' — ClipGen AI';
       var thumb=v.thumbData
         ?'<img src="'+v.thumbData+'" style="width:100%;border-radius:14px;display:block">'
-        :'<div style="width:100%;height:220px;border-radius:14px;background:var(--s2);display:flex;align-items:center;justify-content:center;font-size:72px">'<img src="https://clipgenai.github.io/logo/ClipGen.png" alt="ClipGen AI" style="width:80px;height:80px;object-fit:contain"></div>';
+        :'<div style="width:100%;height:220px;border-radius:14px;background:var(--s2);display:flex;align-items:center;justify-content:center;font-size:72px"><img src="https://clipgenai.github.io/logo/ClipGen.png" alt="ClipGen AI" style="width:80px;height:80px;object-fit:contain"></div>';
       $('app').innerHTML=
         '<div style="min-height:100vh;background:var(--bg);padding:28px 16px 64px">'+
         '<div style="max-width:540px;margin:0 auto">'+
